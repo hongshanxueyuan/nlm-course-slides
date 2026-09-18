@@ -33,8 +33,9 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 ## Prerequisites
 
 - 开始前确认 `nlm` 已安装并已登录；如有需要，运行 `nlm login`。
-- 输入优先使用本地 JSON；如果用户给的是 `tenant_id + course_id`，先调用 `fira-insights` 的 `get_course_content_json`，再把返回的 `signed_url` 下载到本地课程目录。
+- 输入优先使用本地 JSON；如果用户给的是 `tenant_id + course_id`，先完成约定样例的 MCP 验证；验证通过后，再调用 `fira-insights` 的 `get_course_content_json`，并按下游用途显式传 `html_block_render_mode`：默认用 `markdown`，只有用户明确需要原始 HTML 标签时才用 `html`，再把返回的 `signed_url` 下载到本地课程目录。
 - 课程结构解析继续沿用现有 manifest/FIRA 解析逻辑与 skip 规则；只有叶子 section 会进入后续阶段。
+- 对 HTML xblock 为主的课程，只有在上面的 MCP 验证通过后，才把 `markdown` 渲染模式作为默认正式调用路径，让导出的 `text` 字段保留标题、强调、列表和段落结构；如果下游明确要消费原始标签，再切到 `html` 渲染模式；如果仍在验证前阶段，继续沿用旧路径或先停在验证环节。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
 
 ## Default Workflow
@@ -46,7 +47,7 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 处理方式：
 
 - 用户已经提供本地 JSON：直接复用并复制到课程目录。
-- 用户提供 `tenant_id + course_id`：先调用 `get_course_content_json`，再下载 `signed_url`。
+- 用户提供 `tenant_id + course_id`：先确认 MCP 验证已通过，再按下游用途调用 `get_course_content_json`；默认传 `html_block_render_mode="markdown"`，只有明确需要原始 HTML 时才传 `html_block_render_mode="html"`，然后下载 `signed_url`。
 - 阶段产物：
   - `course-json-report.json`
   - 课程目录内的 JSON 文件
