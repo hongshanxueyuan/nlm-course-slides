@@ -10,7 +10,14 @@ import json
 import sys
 from pathlib import Path
 
-from common import default_resource_title, load_course_manifest, sanitize_filename, utc_timestamp, write_json
+from common import (
+    build_section_list_entry,
+    load_course_manifest,
+    materialize_markdown_artifacts,
+    sanitize_filename,
+    utc_timestamp,
+    write_json,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,16 +33,9 @@ def main() -> int:
     manifest = load_course_manifest(args.manifest)
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    materialize_markdown_artifacts(manifest, output_dir=output_dir)
 
-    sections = [
-        {
-            "section_id": section.id,
-            "section_title": section.title,
-            "resource_title": section.resource_title or default_resource_title(section.id, section.title),
-            "output_name": section.output_name,
-        }
-        for section in manifest.sections
-    ]
+    sections = [build_section_list_entry(section) for section in manifest.sections]
     payload = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,

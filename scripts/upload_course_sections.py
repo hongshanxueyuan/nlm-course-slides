@@ -18,7 +18,9 @@ from common import (
     default_resource_title,
     ensure_authenticated,
     find_section,
+    load_canonical_markdown_body,
     load_course_manifest,
+    load_section_list_metadata_map,
     read_json,
     sanitize_filename,
     utc_timestamp,
@@ -68,6 +70,11 @@ def main() -> int:
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     section_id_filter = _load_section_id_filter(args)
+    section_metadata_by_id = (
+        load_section_list_metadata_map(Path(args.section_list).resolve())
+        if args.section_list
+        else {}
+    )
     sections = manifest.sections
     if section_id_filter:
         sections = [section for section in sections if section.id in section_id_filter]
@@ -85,12 +92,23 @@ def main() -> int:
     results = []
     failures = 0
     for index, section in enumerate(sections):
-        resource_title = section.resource_title or default_resource_title(section.id, section.title)
+        section_metadata = section_metadata_by_id.get(section.id)
+        resource_title = str(
+            (section_metadata or {}).get("resource_title")
+            or section.resource_title
+            or default_resource_title(section.id, section.title)
+        ).strip()
         try:
+            md_name, block_type, markdown_body = load_canonical_markdown_body(
+                section,
+                output_dir=output_dir,
+                metadata=section_metadata,
+                default_block_type=manifest.default_block_type,
+            )
             source_id = add_text_source(
                 notebook_id,
                 resource_title,
-                section.content,
+                markdown_body,
                 profile=args.profile,
                 dry_run=args.dry_run,
                 wait_timeout=args.source_wait_timeout,
@@ -100,6 +118,8 @@ def main() -> int:
                     "section_id": section.id,
                     "section_title": section.title,
                     "resource_title": resource_title,
+                    "md_name": md_name,
+                    "block_type": block_type,
                     "status": "uploaded",
                     "source_id": source_id,
                     "error": None,
@@ -112,6 +132,8 @@ def main() -> int:
                     "section_id": section.id,
                     "section_title": section.title,
                     "resource_title": resource_title,
+                    "md_name": str((section_metadata or {}).get("md_name") or section.md_name or ""),
+                    "block_type": str((section_metadata or {}).get("block_type") or section.block_type or manifest.default_block_type),
                     "status": "failed_upload",
                     "source_id": None,
                     "error": str(exc),

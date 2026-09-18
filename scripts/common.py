@@ -6,6 +6,7 @@ Shared helpers for the nlm-course-slides skill.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -18,7 +19,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    class _FcntlCompat:
+        LOCK_EX = 0
+        LOCK_UN = 0
+
+        @staticmethod
+        def flock(_fd: int, _op: int) -> None:
+            return None
+
+    fcntl = _FcntlCompat()
 
 
 UUID_RE = re.compile(
@@ -56,6 +68,15 @@ NLM_RATE_LIMIT_MAX_DELAY_SECONDS = 240.0
 NLM_RATE_LIMIT_MAX_RETRIES = 4
 NLM_RATE_LIMIT_LOCK_PATH = Path(tempfile.gettempdir()) / "nlm-course-slides.rate-limit.lock"
 NLM_STATUS_RATE_LIMIT_LOCK_PATH = Path(tempfile.gettempdir()) / "nlm-course-slides.status-rate-limit.lock"
+PAGE_MARKER_RE = re.compile(r"^\s*-\s*第\s*(\d+)\s*页\s*$", re.MULTILINE)
+HTML_TAG_RE = re.compile(r"<[A-Za-z/!][^>]*>")
+EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
+SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
+HTML_PAGINATION_MAX_PAGES = 20
+HTML_PAGINATION_COMMAND_ENV = "NLM_HTML_PAGINATION_COMMAND"
+HTML_PAGINATION_RULES_PATH = (
+    Path(__file__).resolve().parent.parent / "references" / "html-pagination-rules.md"
+)
 
 
 @dataclass
@@ -68,6 +89,19 @@ class Section:
     output_name: str
     focus: str | None = None
     resource_title: str | None = None
+    md_name: str | None = None
+    block_type: str | None = None
+    page_content: list[str] | None = None
+    page_count: int | None = None
+    source_blocks: list[SectionSourceBlock] | None = None
+
+
+@dataclass
+class SectionSourceBlock:
+    category: str
+    name: str
+    text: str
+    vertical_name: str | None = None
 
 
 @dataclass
@@ -75,6 +109,8 @@ class CourseManifest:
     course_title: str
     sections: list[Section]
     source_path: str
+    source_kind: str = "generic"
+    default_block_type: str = "html"
 
 
 @dataclass
@@ -116,6 +152,10 @@ def default_output_name(section_id: str, title: str) -> str:
     return f"{section_id} {clean_title}.pptx"
 
 
+def default_md_name(output_name: str) -> str:
+    return f"{Path(output_name).stem}.md"
+
+
 def default_resource_title(section_id: str, title: str) -> str:
     if title_starts_with_section_id(title, section_id):
         return title.strip()
@@ -145,6 +185,587 @@ def strip_section_prefix(title: str) -> str:
 
 def build_focus_prompt(title: str) -> str:
     return FOCUS_PROMPT_TEMPLATE.format(section_title=strip_section_prefix(title))
+
+
+def _normalize_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _strip_empty_heading_blocks(text: str) -> str:
+    blocks = [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
+    kept = [block for block in blocks if not EMPTY_MARKDOWN_HEADING_RE.fullmatch(block)]
+    return "\n\n".join(kept).strip()
+
+
+def load_html_pagination_rules() -> str:
+    if not HTML_PAGINATION_RULES_PATH.exists():
+        raise RuntimeError(
+            f"Missing html pagination rules reference: {HTML_PAGINATION_RULES_PATH}"
+        )
+    rules = HTML_PAGINATION_RULES_PATH.read_text(encoding="utf-8").strip()
+    if not rules:
+        raise RuntimeError(
+            f"html pagination rules reference is empty: {HTML_PAGINATION_RULES_PATH}"
+        )
+    return rules
+
+
+def _clean_page_body(text: str) -> str:
+    normalized = _normalize_newlines(text or "").strip()
+    if HTML_TAG_RE.search(normalized):
+        raise RuntimeError(
+            "Canonical Markdown must not contain raw HTML tags; use markdown-rendered teaching text"
+        )
+    normalized = _strip_empty_heading_blocks(normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def _normalize_explicit_page_content(page_content: list[str]) -> list[str]:
+    pages: list[str] = []
+    for index, page in enumerate(page_content, start=1):
+        if not isinstance(page, str):
+            raise RuntimeError(f"page_content[{index - 1}] must be a string")
+        normalized = _clean_page_body(page)
+        if PAGE_MARKER_RE.search(normalized):
+            raise RuntimeError("page_content entries must not contain page marker lines")
+        if not normalized:
+            raise RuntimeError(f"page_content[{index - 1}] must not be empty")
+        pages.append(normalized)
+    if not pages:
+        raise RuntimeError("page_content must contain at least one page")
+    return pages
+
+
+def _heading_level(block: str) -> int | None:
+    first_line = block.splitlines()[0].strip()
+    match = re.match(r"^(#{1,6})\s+(.+)$", first_line)
+    if not match:
+        return None
+    return len(match.group(1))
+
+
+def _heading_text(block: str) -> str | None:
+    first_line = block.splitlines()[0].strip()
+    match = re.match(r"^#{1,6}\s+(.+)$", first_line)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _is_summary_block(block: str) -> bool:
+    title = _heading_text(block)
+    return bool(title and title in SUMMARY_HEADING_TEXTS)
+
+
+def _split_markdown_blocks(text: str) -> list[str]:
+    return [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
+
+
+def _group_blocks_into_units(blocks: list[str]) -> list[str]:
+    units: list[str] = []
+    current: list[str] = []
+    for block in blocks:
+        level = _heading_level(block)
+        if current and (level is not None and level <= 2):
+            units.append("\n\n".join(current).strip())
+            current = [block]
+            continue
+        if current and _is_summary_block(block):
+            units.append("\n\n".join(current).strip())
+            current = [block]
+            continue
+        current.append(block)
+    if current:
+        units.append("\n\n".join(current).strip())
+    return [unit for unit in units if unit]
+
+
+def _split_long_unit(unit: str, *, max_chars: int = 1800) -> list[str]:
+    if len(unit) <= max_chars:
+        return [unit]
+
+    blocks = _split_markdown_blocks(unit)
+    split_units: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for block in blocks:
+        level = _heading_level(block)
+        next_len = current_len + len(block)
+        should_split = current and (
+            (level is not None and level >= 3 and current_len >= max_chars // 2)
+            or (next_len > max_chars and current_len >= max_chars // 2)
+        )
+        if should_split:
+            split_units.append("\n\n".join(current).strip())
+            current = [block]
+            current_len = len(block)
+            continue
+        current.append(block)
+        current_len = next_len + 2
+    if current:
+        split_units.append("\n\n".join(current).strip())
+    return [split_unit for split_unit in split_units if split_unit]
+
+
+def _chunk_units(units: list[str], chunk_count: int) -> list[str]:
+    chunks: list[str] = []
+    start = 0
+    total_units = len(units)
+    for remaining_chunks in range(chunk_count, 0, -1):
+        remaining_units = total_units - start
+        size = math.ceil(remaining_units / remaining_chunks)
+        chunk_units = units[start : start + size]
+        chunks.append("\n\n".join(chunk_units).strip())
+        start += size
+    return [chunk for chunk in chunks if chunk]
+
+
+def _collapse_units_to_page_limit(
+    units: list[str],
+    *,
+    max_pages: int,
+    preserve_summary_page: bool,
+) -> list[str]:
+    if len(units) <= max_pages:
+        return [unit.strip() for unit in units if unit.strip()]
+
+    keep_summary = preserve_summary_page and bool(units) and _is_summary_block(units[-1])
+    main_units = units[:-1] if keep_summary else units
+    page_slots = max_pages - 1 if keep_summary else max_pages
+    if page_slots <= 0:
+        raise RuntimeError(f"Could not fit paginated content within {max_pages} pages")
+
+    pages = _chunk_units(main_units, page_slots)
+    if keep_summary:
+        pages.append(units[-1].strip())
+    return [page for page in pages if page]
+
+
+def _requires_summary_tail_preservation(rules: str) -> bool:
+    return all(
+        fragment in rules
+        for fragment in (
+            "本节要点",
+            "总结",
+            "复盘",
+            "最后一页",
+        )
+    )
+
+
+def build_html_pagination_prompt(text: str, *, rules: str) -> str:
+    if "{text}" in rules:
+        return rules.replace("{text}", text)
+    return "\n\n".join([rules, text])
+
+
+def _extract_json_payload(raw_output: str) -> str:
+    stripped = raw_output.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
+            return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _parse_html_pagination_model_output(raw_output: str) -> list[str]:
+    payload_text = _extract_json_payload(raw_output)
+    if not payload_text:
+        raise RuntimeError("html pagination model returned empty output")
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("html pagination model must return valid JSON") from exc
+
+    if isinstance(payload, dict):
+        pages = payload.get("pages")
+    else:
+        pages = payload
+    if not isinstance(pages, list):
+        raise RuntimeError("html pagination model must return a JSON list or an object with a 'pages' list")
+    return _normalize_explicit_page_content(pages)
+
+
+def _run_html_pagination_model(prompt: str) -> list[str] | None:
+    command = os.environ.get(HTML_PAGINATION_COMMAND_ENV, "").strip()
+    if not command:
+        return None
+
+    args = shlex.split(command, posix=os.name != "nt")
+    result = subprocess.run(
+        args,
+        input=prompt,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise RuntimeError(
+            f"html pagination model command failed with exit code {result.returncode}: {stderr or 'no stderr'}"
+        )
+    return _parse_html_pagination_model_output(result.stdout)
+
+
+def _paginate_markdown_content_with_rules(text: str, *, rules: str) -> list[str]:
+    normalized = _clean_page_body(text)
+    if not normalized:
+        raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
+
+    blocks = _split_markdown_blocks(normalized)
+    units = _group_blocks_into_units(blocks)
+    expanded_units: list[str] = []
+    for unit in units:
+        expanded_units.extend(_split_long_unit(unit))
+
+    pages = _collapse_units_to_page_limit(
+        expanded_units,
+        max_pages=HTML_PAGINATION_MAX_PAGES,
+        preserve_summary_page=_requires_summary_tail_preservation(rules),
+    )
+    normalized_pages = [_clean_page_body(page) for page in pages if _clean_page_body(page)]
+    if not normalized_pages:
+        raise RuntimeError("html pagination did not produce any pages")
+    if len(normalized_pages) > HTML_PAGINATION_MAX_PAGES:
+        raise RuntimeError("html pagination exceeded the 20-page contract")
+    return normalized_pages
+
+
+def paginate_markdown_content(text: str) -> list[str]:
+    rules = load_html_pagination_rules()
+    normalized = _clean_page_body(text)
+    if not normalized:
+        raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
+
+    prompt = build_html_pagination_prompt(normalized, rules=rules)
+    model_pages = _run_html_pagination_model(prompt)
+    if model_pages is not None:
+        if len(model_pages) > HTML_PAGINATION_MAX_PAGES:
+            raise RuntimeError("html pagination exceeded the 20-page contract")
+        return model_pages
+    return _paginate_markdown_content_with_rules(normalized, rules=rules)
+
+
+def _strip_legacy_preface(
+    text: str,
+    *,
+    section_title: str,
+    output_stem: str,
+) -> str:
+    match = PAGE_MARKER_RE.search(text)
+    if not match:
+        return text
+
+    preface = text[: match.start()].strip()
+    if not preface:
+        return text
+
+    preface_lines = [re.sub(r"^#{1,6}\s*", "", line).strip() for line in preface.splitlines()]
+    preface_lines = [line for line in preface_lines if line]
+    if len(preface_lines) != 1:
+        return text
+
+    normalized_preface = preface_lines[0]
+    valid_titles = {
+        section_title.strip(),
+        strip_section_prefix(section_title).strip(),
+        output_stem.strip(),
+    }
+    if normalized_preface in valid_titles:
+        return text[match.start() :].lstrip()
+    return text
+
+
+def parse_canonical_markdown_pages(
+    text: str,
+    *,
+    section_title: str,
+    output_stem: str,
+    allow_legacy_preface: bool = False,
+) -> list[str]:
+    normalized = _normalize_newlines(text or "").strip()
+    if allow_legacy_preface:
+        normalized = _strip_legacy_preface(
+            normalized,
+            section_title=section_title,
+            output_stem=output_stem,
+        )
+
+    matches = list(PAGE_MARKER_RE.finditer(normalized))
+    if not matches:
+        raise RuntimeError("Canonical Markdown must contain at least one page marker")
+    if normalized[: matches[0].start()].strip():
+        raise RuntimeError("Canonical Markdown must begin with the page-1 marker")
+
+    pages: list[str] = []
+    for index, match in enumerate(matches):
+        expected_page_number = index + 1
+        actual_page_number = int(match.group(1))
+        if actual_page_number != expected_page_number:
+            raise RuntimeError(
+                f"Canonical Markdown page markers must be sequential; expected page {expected_page_number} but found page {actual_page_number}"
+            )
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+        body = _clean_page_body(normalized[start:end])
+        if not body:
+            raise RuntimeError(f"Page {index + 1} must not be empty")
+        if PAGE_MARKER_RE.search(body):
+            raise RuntimeError("Nested page markers are not allowed inside page bodies")
+        pages.append(body)
+    return pages
+
+
+def serialize_canonical_markdown(page_content: list[str]) -> str:
+    pages = _normalize_explicit_page_content(page_content)
+    rendered_pages = [
+        f"- 第 {index} 页\n\n{page}"
+        for index, page in enumerate(pages, start=1)
+    ]
+    return "\n\n".join(rendered_pages).strip() + "\n"
+
+
+def _collect_fira_source_blocks(section_data: dict[str, Any]) -> list[SectionSourceBlock]:
+    source_blocks: list[SectionSourceBlock] = []
+    for vertical in section_data.get("verticals") or []:
+        if not isinstance(vertical, dict):
+            continue
+        vertical_name = str(vertical.get("name") or "").strip() or None
+        for block in vertical.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text") or "").strip()
+            category = str(block.get("category") or "").strip()
+            name = str(block.get("name") or "").strip()
+            if not text or not category:
+                continue
+            source_blocks.append(
+                SectionSourceBlock(
+                    category=category,
+                    name=name,
+                    text=text,
+                    vertical_name=vertical_name,
+                )
+            )
+    return source_blocks
+
+
+def _select_fira_blocks(
+    source_blocks: list[SectionSourceBlock],
+    *,
+    category: str,
+) -> list[SectionSourceBlock]:
+    preferred = [
+        block
+        for block in source_blocks
+        if block.category == category and "训战" not in (block.vertical_name or "")
+    ]
+    if preferred:
+        return preferred
+    return [block for block in source_blocks if block.category == category]
+
+
+def _extract_fira_section_content(
+    section_data: dict[str, Any],
+    *,
+    course_block_type: str,
+) -> tuple[str, list[SectionSourceBlock]]:
+    source_blocks = _collect_fira_source_blocks(section_data)
+    if course_block_type == "imagesgallery":
+        gallery_blocks = _select_fira_blocks(source_blocks, category="imagesgallery")
+        if gallery_blocks:
+            return gallery_blocks[0].text.strip(), source_blocks
+
+    html_blocks = _select_fira_blocks(source_blocks, category="html")
+    html_texts = [block.text.strip() for block in html_blocks if block.text.strip()]
+    return "\n\n".join(html_texts).strip(), source_blocks
+
+
+def _fira_course_has_imagesgallery(chapters: list[Any]) -> bool:
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        chapter_name = str(chapter.get("name") or "").strip()
+        if chapter_name in FIRA_SKIP_CHAPTER_NAMES:
+            continue
+        chapter_sections = chapter.get("sections") or []
+        if not isinstance(chapter_sections, list):
+            continue
+        for index, section_data in enumerate(chapter_sections):
+            if index == 0 or not isinstance(section_data, dict):
+                continue
+            source_blocks = _collect_fira_source_blocks(section_data)
+            if _select_fira_blocks(source_blocks, category="imagesgallery"):
+                return True
+    return False
+
+
+def _resolve_section_block_type(section: Section, *, default_block_type: str) -> str:
+    block_type = (section.block_type or default_block_type or "html").strip()
+    if block_type not in {"imagesgallery", "html"}:
+        raise RuntimeError(
+            f"Unsupported block_type '{block_type}' for section {section.id}"
+        )
+    return block_type
+
+
+def _resolve_section_md_name(section: Section) -> str:
+    md_name = str(section.md_name or default_md_name(section.output_name)).strip()
+    if not md_name.lower().endswith(".md"):
+        raise RuntimeError(f"md_name must end with .md: {md_name}")
+    if Path(md_name).stem != Path(section.output_name).stem:
+        raise RuntimeError(
+            f"md_name '{md_name}' must share the same stem as output_name '{section.output_name}'"
+        )
+    return md_name
+
+
+def _select_imagesgallery_source_text(section: Section) -> str:
+    if section.source_blocks:
+        gallery_blocks = _select_fira_blocks(section.source_blocks, category="imagesgallery")
+        if gallery_blocks:
+            return gallery_blocks[0].text.strip()
+    if section.content and PAGE_MARKER_RE.search(section.content):
+        return section.content.strip()
+    raise RuntimeError(
+        f"Section {section.id} is on the imagesgallery route but has no usable imagesgallery text"
+    )
+
+
+def _select_html_source_text(section: Section) -> str:
+    if section.source_blocks:
+        html_blocks = _select_fira_blocks(section.source_blocks, category="html")
+        html_texts = [_clean_page_body(block.text) for block in html_blocks if block.text.strip()]
+        html_texts = [text for text in html_texts if text]
+        if html_texts:
+            return "\n\n".join(html_texts).strip()
+    if section.content.strip():
+        return _clean_page_body(section.content)
+    raise RuntimeError(
+        f"Section {section.id} is on the html route but has no usable teaching text"
+    )
+
+
+def materialize_section_markdown(
+    section: Section,
+    *,
+    output_dir: Path,
+    default_block_type: str,
+) -> Path:
+    block_type = _resolve_section_block_type(section, default_block_type=default_block_type)
+    md_name = _resolve_section_md_name(section)
+
+    if section.page_content is not None:
+        pages = _normalize_explicit_page_content(section.page_content)
+    elif block_type == "imagesgallery":
+        pages = parse_canonical_markdown_pages(
+            _select_imagesgallery_source_text(section),
+            section_title=section.title,
+            output_stem=Path(md_name).stem,
+            allow_legacy_preface=True,
+        )
+    else:
+        pages = paginate_markdown_content(_select_html_source_text(section))
+
+    if section.page_count is not None and section.page_count != len(pages):
+        raise RuntimeError(
+            f"page_count {section.page_count} does not match len(page_content) {len(pages)} for section {section.id}"
+        )
+    if block_type == "html" and len(pages) > HTML_PAGINATION_MAX_PAGES:
+        raise RuntimeError(
+            f"html pagination exceeded the 20-page contract for section {section.id}"
+        )
+
+    md_path = output_dir / md_name
+    md_path.write_text(serialize_canonical_markdown(pages), encoding="utf-8")
+
+    section.md_name = md_name
+    section.block_type = block_type
+    section.page_content = pages
+    section.page_count = len(pages)
+    return md_path
+
+
+def materialize_markdown_artifacts(
+    manifest: CourseManifest,
+    *,
+    output_dir: Path,
+) -> None:
+    for section in manifest.sections:
+        materialize_section_markdown(
+            section,
+            output_dir=output_dir,
+            default_block_type=manifest.default_block_type,
+        )
+
+
+def build_section_list_entry(section: Section) -> dict[str, Any]:
+    if section.md_name is None or section.block_type is None:
+        raise RuntimeError(
+            f"Section {section.id} is missing canonical Markdown metadata"
+        )
+    if section.page_content is None or section.page_count is None:
+        raise RuntimeError(
+            f"Section {section.id} is missing page_content/page_count metadata"
+        )
+
+    return {
+        "section_id": section.id,
+        "section_title": section.title,
+        "resource_title": section.resource_title or default_resource_title(section.id, section.title),
+        "output_name": section.output_name,
+        "md_name": section.md_name,
+        "block_type": section.block_type,
+        "page_content": section.page_content,
+        "page_count": section.page_count,
+    }
+
+
+def load_section_list_metadata_map(path: Path) -> dict[str, dict[str, Any]]:
+    payload = read_json(path)
+    metadata: dict[str, dict[str, Any]] = {}
+    for item in payload.get("sections", []):
+        if not isinstance(item, dict):
+            continue
+        section_id = item.get("section_id")
+        if isinstance(section_id, str):
+            metadata[section_id] = item
+    return metadata
+
+
+def load_canonical_markdown_body(
+    section: Section,
+    *,
+    output_dir: Path,
+    metadata: dict[str, Any] | None = None,
+    default_block_type: str,
+) -> tuple[str, str, str]:
+    md_name = str((metadata or {}).get("md_name") or section.md_name or default_md_name(section.output_name)).strip()
+    block_type = str((metadata or {}).get("block_type") or section.block_type or default_block_type).strip()
+    if block_type not in {"imagesgallery", "html"}:
+        raise RuntimeError(f"Unsupported block_type '{block_type}' for section {section.id}")
+    if Path(md_name).stem != Path(section.output_name).stem:
+        raise RuntimeError(
+            f"md_name '{md_name}' must share the same stem as output_name '{section.output_name}'"
+        )
+
+    md_path = output_dir / md_name
+    if not md_path.exists():
+        raise FileNotFoundError(f"Canonical Markdown is missing: {md_path}")
+
+    body = md_path.read_text(encoding="utf-8")
+    pages = parse_canonical_markdown_pages(
+        body,
+        section_title=section.title,
+        output_stem=Path(md_name).stem,
+        allow_legacy_preface=False,
+    )
+    if block_type == "html" and len(pages) > HTML_PAGINATION_MAX_PAGES:
+        raise RuntimeError(
+            f"Canonical Markdown exceeded the 20-page contract for section {section.id}"
+        )
+    return md_name, block_type, body
 
 
 def parse_first_uuid(text: str) -> str:
@@ -954,10 +1575,44 @@ def _normalize_manifest(data: Any, source: Path) -> CourseManifest:
             focus = item.get("focus") or item.get("prompt")
             resource_title = item.get("resource_title") or item.get("source_title")
             output_name = item.get("output_name") or item.get("filename")
+            md_name = item.get("md_name")
+            block_type = item.get("block_type")
+            raw_page_content = item.get("page_content")
+            page_count = item.get("page_count")
+            if raw_page_content is not None and not isinstance(raw_page_content, list):
+                raise RuntimeError(
+                    f"page_content for section {section_id} must be a list in {source}"
+                )
+            page_content = (
+                _normalize_explicit_page_content(raw_page_content)
+                if isinstance(raw_page_content, list)
+                else None
+            )
+            if page_count is not None and not isinstance(page_count, int):
+                raise RuntimeError(
+                    f"page_count for section {section_id} must be an integer in {source}"
+                )
+            if block_type is not None and str(block_type).strip() not in {"imagesgallery", "html"}:
+                raise RuntimeError(
+                    f"block_type for section {section_id} must be 'imagesgallery' or 'html' in {source}"
+                )
 
-            if content:
+            if not content and page_content:
+                content = "\n\n".join(page_content).strip()
+
+            if content or page_content:
                 counter += 1
                 slug = str(item.get("slug") or slugify(title, fallback=f"section-{counter}"))
+                resolved_output_name = str(output_name or default_output_name(section_id, title))
+                resolved_md_name = str(md_name).strip() if md_name else None
+                if resolved_md_name and Path(resolved_md_name).stem != Path(resolved_output_name).stem:
+                    raise RuntimeError(
+                        f"md_name '{resolved_md_name}' must share the same stem as output_name '{resolved_output_name}' in {source}"
+                    )
+                if page_count is not None and page_content is not None and page_count != len(page_content):
+                    raise RuntimeError(
+                        f"page_count {page_count} does not match len(page_content) {len(page_content)} for section {section_id} in {source}"
+                    )
                 sections.append(
                     Section(
                         id=section_id,
@@ -965,9 +1620,13 @@ def _normalize_manifest(data: Any, source: Path) -> CourseManifest:
                         title=title,
                         content=content,
                         slug=slug,
-                        output_name=str(output_name or default_output_name(section_id, title)),
+                        output_name=resolved_output_name,
                         focus=str(focus).strip() if focus else None,
                         resource_title=str(resource_title).strip() if resource_title else None,
+                        md_name=resolved_md_name,
+                        block_type=str(block_type).strip() if block_type else None,
+                        page_content=page_content,
+                        page_count=page_count,
                     )
                 )
 
@@ -981,11 +1640,15 @@ def _normalize_manifest(data: Any, source: Path) -> CourseManifest:
 
     visit(raw_sections, [])
     if not sections:
-        raise RuntimeError(f"No leaf sections with content were found in {source}")
+        raise RuntimeError(
+            f"No leaf sections with content or explicit page_content were found in {source}"
+        )
     return CourseManifest(
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
+        source_kind=source.suffix.lower().lstrip(".") or "json",
+        default_block_type="html",
     )
 
 
@@ -997,6 +1660,7 @@ def _load_fira_course_manifest(data: dict[str, Any], source: Path) -> CourseMani
 
     sections: list[Section] = []
     counter = 0
+    course_block_type = "imagesgallery" if _fira_course_has_imagesgallery(chapters) else "html"
 
     for chapter in chapters:
         if not isinstance(chapter, dict):
@@ -1019,7 +1683,10 @@ def _load_fira_course_manifest(data: dict[str, Any], source: Path) -> CourseMani
             if not title:
                 continue
 
-            content = extract_fira_section_content(section_data)
+            content, source_blocks = _extract_fira_section_content(
+                section_data,
+                course_block_type=course_block_type,
+            )
             if not content:
                 continue
 
@@ -1034,6 +1701,7 @@ def _load_fira_course_manifest(data: dict[str, Any], source: Path) -> CourseMani
                     slug=slugify(strip_section_prefix(title), fallback=f"section-{counter}"),
                     output_name=default_output_name(section_id, title),
                     resource_title=default_resource_title(section_id, title),
+                    source_blocks=source_blocks,
                 )
             )
 
@@ -1044,34 +1712,17 @@ def _load_fira_course_manifest(data: dict[str, Any], source: Path) -> CourseMani
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
+        source_kind="fira",
+        default_block_type=course_block_type,
     )
 
 
 def extract_fira_section_content(section_data: dict[str, Any]) -> str:
-    preferred_texts: list[str] = []
-    fallback_texts: list[str] = []
-
-    for vertical in section_data.get("verticals") or []:
-        if not isinstance(vertical, dict):
-            continue
-        vertical_name = str(vertical.get("name") or "").strip()
-        texts = []
-        for block in vertical.get("blocks") or []:
-            if not isinstance(block, dict):
-                continue
-            if block.get("name") != "文字讲解":
-                continue
-            text = str(block.get("text") or "").strip()
-            if text:
-                texts.append(text)
-        if not texts:
-            continue
-        fallback_texts.extend(texts)
-        if "训战" not in vertical_name:
-            preferred_texts.extend(texts)
-
-    texts = preferred_texts or fallback_texts
-    return "\n\n".join(texts).strip()
+    content, _source_blocks = _extract_fira_section_content(
+        section_data,
+        course_block_type="html",
+    )
+    return content
 
 
 def _load_markdown_manifest(source: Path) -> CourseManifest:
@@ -1132,4 +1783,6 @@ def _load_markdown_manifest(source: Path) -> CourseManifest:
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
+        source_kind="markdown",
+        default_block_type="html",
     )
