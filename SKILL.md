@@ -36,6 +36,7 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 - 输入优先使用本地 JSON；如果用户给的是 `tenant_id + course_id`，先完成约定样例的 MCP 验证；验证通过后，再调用 `fira-insights` 的 `get_course_content_json`，并按下游用途显式传 `html_block_render_mode`：默认用 `markdown`，只有用户明确需要原始 HTML 标签时才用 `html`，再把返回的 `signed_url` 下载到本地课程目录。
 - 课程结构解析继续沿用现有 manifest/FIRA 解析逻辑与 skip 规则；只有叶子 section 会进入后续阶段。
 - 对 HTML xblock 为主的课程，只有在上面的 MCP 验证通过后，才把 `markdown` 渲染模式作为默认正式调用路径，让导出的 `text` 字段保留标题、强调、列表和段落结构；如果下游明确要消费原始标签，再切到 `html` 渲染模式；如果仍在验证前阶段，继续沿用旧路径或先停在验证环节。
+- 阶段 B 里如果 section 走 `html` 路线，分页规则固定读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它是 skill 自带的分页 prompt 资产，不要临时改用别的分页说明。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
 
 ## Default Workflow
@@ -77,6 +78,11 @@ python3 scripts/prepare_course_json.py \
 ### 阶段 B：生成 section 清单
 
 目标：把后续会上传的 section 清晰列出来，并在这里进行第一次人工确认。
+
+补充说明：
+
+- 对 `imagesgallery` 路线，阶段 B 直接规范化已有分页文本。
+- 对 `html` 路线，阶段 B 会读取 [references/html-pagination-rules.md](references/html-pagination-rules.md) 作为分页 prompt/规则资产，把 Markdown 教学正文切成 canonical page 内容，再写入 `section-list.json` 和对应 `.md` 文件。
 
 命令：
 
@@ -330,3 +336,4 @@ python3 scripts/summarize_course_slide_status.py \
 ## References
 
 - [references/manifest-format.md](references/manifest-format.md)
+- [references/html-pagination-rules.md](references/html-pagination-rules.md)
