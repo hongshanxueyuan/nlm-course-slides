@@ -1,6 +1,6 @@
 ---
 name: nlm-course-slides
-description: Run a staged, human-confirmed NotebookLM course-slides workflow from a local course JSON or a FIRA tenant/course pair. Use when Codex needs to fetch course JSON, list section resources, upload sections to NotebookLM, create one slide deck per section, monitor/rename decks, optionally download PPTX files, and summarize or retry only failed sections.
+description: Run a staged, human-confirmed NotebookLM course-slides workflow from a local course JSON or a FIRA tenant/course pair. Use when Codex needs to fetch course JSON, list section resources, upload sections to NotebookLM, create one slide deck per section, monitor/rename decks, optionally download PPTX files, post-process downloaded decks in the local environment, and summarize or retry only failed sections.
 ---
 
 # NLM Course Slides
@@ -38,6 +38,7 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 - 对 HTML xblock 为主的课程，只有在上面的 MCP 验证通过后，才把 `markdown` 渲染模式作为默认正式调用路径，让导出的 `text` 字段保留标题、强调、列表和段落结构；如果下游明确要消费原始标签，再切到 `html` 渲染模式；如果仍在验证前阶段，继续沿用旧路径或先停在验证环节。
 - 阶段 B 里如果 section 走 `html` 路线，分页规则固定读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它是 skill 自带的分页 prompt 资产，不要临时改用别的分页说明。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
+- 如果需要本地下载后处理，默认使用 skill 自带的 `assets/logo.png`；如果用户需要换图标，在阶段 F 传 `--postprocess-image-path <absolute-path>`。
 
 ## Default Workflow
 
@@ -259,6 +260,9 @@ python3 scripts/monitor_and_finalize_slides.py \
 - 默认不下载。
 - 只有用户明确要求“下载到本地”时才执行。
 - 下载失败自动重试 `3` 次。
+- 默认先下载原始 PPTX 到临时路径，再执行本地后处理，产出用户可直接交付的最终 PPTX。
+- 默认同时在最终 PPTX 旁边写出同名 `.md` 文稿文件。
+- 如果只想保留原始下载、不做本地后处理，可追加 `--skip-local-postprocess`。
 - 本阶段固定沿用 CLI 脚本链执行，不重新选择工具方式。
 - 阶段结束后汇报下载结果。
 
@@ -337,3 +341,12 @@ python3 scripts/summarize_course_slide_status.py \
 
 - [references/manifest-format.md](references/manifest-format.md)
 - [references/html-pagination-rules.md](references/html-pagination-rules.md)
+
+## Local Download Post-Processing
+
+- 默认原始下载文件先落到临时目录，不直接作为最终交付件。
+- 默认覆盖每页右下角固定 NotebookLM 水印区域。遮挡矩形尺寸：`3.39 cm x 0.64 cm`；位置：`x=41.63 cm`、`y=24.55 cm`。
+- 默认追加本地 logo：`assets/logo.png`。如果用户显式提供别的图片路径，则用 `--postprocess-image-path` 覆盖。
+- logo 画框尺寸：`4.10 cm x 1.19 cm`；位置：`x=40.26 cm`、`y=23.36 cm`；保持 `lockAspectRatio=true`，并按原图 `6%` 缩放。
+- 最终用户可见 PPTX 文件名后缀固定为 `_水印版.pptx`。
+- 如果抽样发现被遮挡区域不是纯白底，脚本会在 JSON 结果里返回对应页码和采样颜色，便于人工复核。
