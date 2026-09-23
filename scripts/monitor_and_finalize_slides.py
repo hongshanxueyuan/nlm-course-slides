@@ -76,10 +76,6 @@ def _load_retry_filter(path: str | None) -> set[str]:
     return selected
 
 
-def _watermark_output_path(raw_output_path: Path) -> Path:
-    return raw_output_path.with_name(f"{raw_output_path.stem}_水印版{raw_output_path.suffix}")
-
-
 def _markdown_output_path(slide_output_path: Path) -> Path:
     return slide_output_path.with_suffix(".md")
 
@@ -97,16 +93,8 @@ def _section_markdown_body(section: object) -> str:
 
 
 def _write_section_markdown(section: object, target_path: Path, *, dry_run: bool) -> bool:
-    markdown_parts = []
-    clean_title = str(getattr(section, "title", "") or "").strip()
     clean_content = _section_markdown_body(section)
-    if clean_title:
-        markdown_parts.append(f"# {clean_title}")
-    if clean_content:
-        if markdown_parts:
-            markdown_parts.append("")
-        markdown_parts.append(clean_content)
-    markdown_text = "\n".join(markdown_parts).strip()
+    markdown_text = clean_content.strip()
     if not markdown_text:
         return False
     markdown_text = f"{markdown_text}\n"
@@ -263,7 +251,7 @@ def main() -> int:
             continue
 
         output_path = output_dir / section.output_name
-        final_output_path = _watermark_output_path(output_path) if args.download and not args.skip_local_postprocess else output_path
+        final_output_path = output_path
         markdown_output_path = _markdown_output_path(final_output_path)
         renamed = False
         downloaded = False

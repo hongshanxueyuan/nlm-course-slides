@@ -3,7 +3,7 @@
  * Post-process a downloaded NotebookLM slide deck:
  * - cover the fixed lower-right watermark area with a same-color rectangle
  * - add the local default logo image near the upper-right corner
- * - export a user-facing PPTX whose name ends with "_水印版.pptx"
+ * - export the cleaned PPTX to the caller-provided output path
  */
 
 import fs from "node:fs/promises";
@@ -32,7 +32,6 @@ const DEFAULTS = {
     width: 6,
     height: 6,
   },
-  suffix: "_水印版",
   imagePath: DEFAULT_IMAGE_PATH,
 };
 
@@ -66,7 +65,7 @@ function parseArgs(argv) {
 function printHelp() {
   process.stdout.write(
     [
-      "Usage: postprocess_downloaded_pptx.mjs --input <raw.pptx> --output <final_水印版.pptx> [--image-path <logo.png>]",
+      "Usage: postprocess_downloaded_pptx.mjs --input <raw.pptx> --output <final.pptx> [--image-path <logo.png>]",
       "",
       "Applies the local default PPT post-processing rules to a downloaded deck.",
       "",
@@ -307,7 +306,6 @@ async function main() {
         image_path: imagePath,
         node_modules_dir: nodeModulesDir,
         slide_count: perSlide.length,
-        suffix: DEFAULTS.suffix,
         logo_rect_cm: DEFAULTS.logoRectCm,
         logo_scale_percent: DEFAULTS.logoScalePercent,
         logo_lock_aspect_ratio: true,
