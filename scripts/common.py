@@ -67,64 +67,25 @@ COURSE_SCENE_ALIASES = {
     "企业出海": COURSE_SCENE_OVERSEAS,
 }
 
-CORE_PAGINATION_AND_STRUCTURE_CONSTRAINTS = """【核心分页与结构约束】：
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+FOCUS_PROMPT_TEMPLATE_FILES = {
+    COURSE_SCENE_STANDARD: PROMPTS_DIR / "企业流程与智能化场景.txt",
+    COURSE_SCENE_OVERSEAS: PROMPTS_DIR / "企业出海场景.txt",
+}
 
-1. 1:1 逐页强对应法则：请严格按来源文档中的分页标识逐页生成对应的演示文稿。演示文稿第 N 页必须且仅能对应来源文档中第 N 个分页标识对应的内容。
-2. 严禁合并与拆分：严禁将来源文档中两个或多个分页标识对应的内容合并为一页 PPT；严禁将来源文档中单个分页标识对应的内容拆分为多页 PPT。
-3. 严禁自行增删页面：取消封面页、结尾页、致谢页、问答页；严禁额外生成来源文档里没有的目录页与转折过渡页。文稿第 1 页必须直接从来源文档第 1 个分页标识对应的正文内容讲起，演示文稿总页数必须与来源文档中的分页标识数量完全一致。"""
 
-STANDARD_FOCUS_PROMPT_TEMPLATE = (
-    """文稿题目：{section_title}
-目标受众：流程与智能化中的企业领导者、企业各个部门业务负责人、企业流程与IT部门员工、人工智能变革项目管理者。请使用面向管理者与变革参与者的专业中文，兼顾业务理解、流程协同与落地执行。
-生成要求：请根据来源文档生成演示文稿，演示文稿要和来源文档的逻辑、观点与核心内容严格对应，帮助学员边看演示文稿边听讲解时，更提纲挈领地理解关键机制、方法、判断依据与管理动作，并据此推动实际变革。开篇直奔主题。必须遵循来源文档中的专业术语和定义。
+def _load_focus_prompt_template(path: Path) -> str:
+    if not path.exists():
+        raise RuntimeError(f"Missing focus prompt template: {path}")
+    template = path.read_text(encoding="utf-8").strip()
+    if not template:
+        raise RuntimeError(f"Focus prompt template is empty: {path}")
+    return template
 
-"""
-    + CORE_PAGINATION_AND_STRUCTURE_CONSTRAINTS
-    + """
-
-内容与专业表达要求：
-不要浪费页面讲口号，要讲清楚关键机制、职责分工、业务场景、管理判断、协同接口、治理动作与实践启发。
-演示文稿以中文为主，但允许保留来源文档中已经出现的英文缩写或英文术语，例如 AI、DSTE、IPD、ISC、ITR、IFS、HRBP。不要额外引入来源文档里没有出现的英文单词、英文句子或纯英文标题。
-
-正文要求：
-- 严禁生成封面页，开篇第一张幻灯片即为来源文档第 1 个分页标识对应的正文内容。
-- 每一页的标题统一使用黑体。
-- 不要把“目标受众”直接写进正文页面。
-- 不要引入来源文档里没有明确出现的流程名、缩写、英文术语、协同关系或背景概念。
-- 如果某个流程名、缩写或术语在当前 section 来源文档中没有出现，就不要为了补充背景主动写进去。
-- 严格围绕当前这一节来源文档生成，不要把整门课程的背景平均分摊到每一页。
-
-视觉效果要求：遵循极简的商务视觉原则，以现代企业扁平线性矢量插图为主，构图上合理留白，营造舒适的视觉呼吸感。全文稿任何地方都严禁放任何徽标（Logo）。
-底版强制要求：全部演示文稿的底版必须统一为纯白色（#FFFFFF），底版区域禁止出现任何底纹、网格线、辅助线、水印、杂色及各类装饰性背景元素，保证底版干净无杂质。
-配图、图标等须使用品牌色，即绿色（RGB 0-176-80），橙色（RGB 255-153-0），蓝色（RGB 51-153-255），可适当加入浅绿色（RGB 97-209-116）、浅橙色（RGB 255-194-102）、浅蓝色（RGB 153-204-255），严禁使用粉色系颜色。"""
-)
-
-OVERSEAS_FOCUS_PROMPT_TEMPLATE = (
-    """文稿题目：{section_title}
-目标受众：中国出海企业员工。 用他们能够听懂的语言，用生动又不失专业性的表达方式来深入讲解。
-来源文档是给中国出海企业员工的课程内容。请根据来源文档生成演示文稿，演示文稿要和来源文档的逻辑与核心内容严格对应，目的是让学员边看演示文稿，边听来源文档的讲解，支持他们更提纲挈领的领会来源文档的要点，从而根据自身实际情况，采取相应的行动。
-开篇尽量简洁，直入主题。
-必须遵循来源文档中的专业用语和定义。
-
-"""
-    + CORE_PAGINATION_AND_STRUCTURE_CONSTRAINTS
-    + """
-
-内容与专业表达要求：
-不要浪费页面讲口号，要讲具体的要点和方法。
-演示文稿只使用中文，严禁出现除了中文之外的任何其他语言、字母。特殊情况：若出现电话号码，使用阿拉伯数字。
-
-正文要求：
-- 严禁生成封面页，开篇第一张幻灯片即为来源文档第 1 个分页标识对应的正文内容。
-
-视觉效果要求: 遵循极简的商务视觉原则，以现代企业扁平线性矢量插图为主，构图上合理留白，营造舒适的视觉呼吸感。全文稿任何地方都严禁放任何徽标（Logo）。
-底版强制要求：全部演示文稿的底版必须统一为纯白色（#FFFFFF），底版区域禁止出现任何底纹、网格线、辅助线、水印、杂色及各类装饰性背景元素，保证底版干净无杂质。
-配图、图标等须使用品牌色，即绿色（RGB 0-176-80），橙色（RGB 255-153-0），蓝色（RGB 51-153-255），可适当加入浅绿色（RGB 97-209-116）、浅橙色（RGB 255-194-102）、浅蓝色（RGB 153-204-255），严禁使用粉色系颜色。"""
-)
 
 FOCUS_PROMPT_TEMPLATES = {
-    COURSE_SCENE_STANDARD: STANDARD_FOCUS_PROMPT_TEMPLATE,
-    COURSE_SCENE_OVERSEAS: OVERSEAS_FOCUS_PROMPT_TEMPLATE,
+    scene: _load_focus_prompt_template(path)
+    for scene, path in FOCUS_PROMPT_TEMPLATE_FILES.items()
 }
 
 FIRA_SKIP_CHAPTER_NAMES = {"训战启程", "训战总结、训战输出", "满意度调查"}
