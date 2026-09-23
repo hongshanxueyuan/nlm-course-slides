@@ -9,6 +9,7 @@ import argparse
 import json
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from common import (
     configure_nlm_api_delay,
@@ -16,9 +17,19 @@ from common import (
     load_course_manifest,
     log_message,
     match_sections_to_notebook_state,
+    read_json,
     sanitize_filename,
     utc_timestamp,
     write_json,
+)
+
+
+RECOVERY_SCENE_REPORT_NAMES = (
+    "recovery-report.json",
+    "finalize-report.json",
+    "create-report.json",
+    "upload-report.json",
+    "section-list.json",
 )
 
 
@@ -35,14 +46,58 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_report_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    payload = read_json(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_recovery_course_scene(
+    *,
+    manifest_path: str,
+    output_dir: Path,
+    report_path: str | None,
+    course_scene_override: str | None,
+) -> str | None:
+    if course_scene_override:
+        return course_scene_override
+
+    candidate_paths: list[Path] = []
+    if report_path:
+        candidate_paths.append(Path(report_path).resolve())
+    candidate_paths.extend(output_dir / name for name in RECOVERY_SCENE_REPORT_NAMES)
+
+    seen_paths: set[Path] = set()
+    for path in candidate_paths:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        payload = _load_report_payload(path)
+        raw_course_scene = payload.get("course_scene")
+        if isinstance(raw_course_scene, str) and raw_course_scene.strip():
+            log_message(f"[recovery-report] reuse course_scene from {path.name}: {raw_course_scene.strip()}")
+            return raw_course_scene.strip()
+
+    manifest = load_course_manifest(manifest_path)
+    return manifest.course_scene
+
+
 def main() -> int:
     args = build_parser().parse_args()
     if args.api_delay_seconds < 0:
         raise SystemExit("--api-delay-seconds must be at least 0")
 
     configure_nlm_api_delay(args.api_delay_seconds)
-    manifest = load_course_manifest(args.manifest, course_scene=args.course_scene)
-    output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
+    initial_manifest = load_course_manifest(args.manifest)
+    output_dir = Path(args.output_dir or sanitize_filename(initial_manifest.course_title)).resolve()
+    resolved_course_scene = _resolve_recovery_course_scene(
+        manifest_path=args.manifest,
+        output_dir=output_dir,
+        report_path=args.report_path,
+        course_scene_override=args.course_scene,
+    )
+    manifest = load_course_manifest(args.manifest, course_scene=resolved_course_scene)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     log_message(f"[recovery-report] loaded manifest: {manifest.source_path}")
