@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notebook-title", help="Notebook title when creating a new notebook")
     parser.add_argument("--output-dir", help="Course output directory")
     parser.add_argument("--report-path", help="Optional upload report output path")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--profile", help="NotebookLM profile")
     parser.add_argument("--source-wait-timeout", type=float, default=600.0)
     parser.add_argument("--api-delay-seconds", type=float, default=5.0)
@@ -66,7 +67,20 @@ def main() -> int:
         raise SystemExit("--api-delay-seconds must be at least 0")
 
     configure_nlm_api_delay(args.api_delay_seconds)
-    manifest = load_course_manifest(args.manifest)
+    section_list_payload = read_json(Path(args.section_list).resolve()) if args.section_list else {}
+    retry_failed_payload = (
+        read_json(Path(args.retry_failed_from_report).resolve())
+        if args.retry_failed_from_report
+        else {}
+    )
+    manifest = load_course_manifest(
+        args.manifest,
+        course_scene=(
+            args.course_scene
+            or section_list_payload.get("course_scene")
+            or retry_failed_payload.get("course_scene")
+        ),
+    )
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     section_id_filter = _load_section_id_filter(args)
@@ -145,6 +159,7 @@ def main() -> int:
     payload = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,
+        "course_scene": manifest.course_scene,
         "output_dir": str(output_dir),
         "notebook_id": notebook_id,
         "notebook_title": args.notebook_title or manifest.course_title,

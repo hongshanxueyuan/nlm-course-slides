@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notebook-id", help="Existing notebook ID or alias")
     parser.add_argument("--notebook-title", help="Notebook title when creating a new notebook")
     parser.add_argument("--output-dir", help="Course output directory")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--profile", help="NotebookLM profile")
     parser.add_argument("--language", default="zh_Hans")
     parser.add_argument("--deck-format", default="detailed_deck")
@@ -124,6 +125,8 @@ def build_normal_section_command(
         "--api-delay-seconds",
         str(args.api_delay_seconds),
     ]
+    if args.course_scene:
+        cmd.extend(["--course-scene", args.course_scene])
     if args.profile:
         cmd.extend(["--profile", args.profile])
     cmd.append("--skip-auth-check")
@@ -209,12 +212,25 @@ def main() -> int:
         raise SystemExit("--max-sections must be at least 1")
 
     configure_nlm_api_delay(args.api_delay_seconds)
-    manifest = load_course_manifest(args.manifest)
+    resume_states = load_resume_states(args.resume_from_report)
+    resume_report_payload = read_json(Path(args.resume_from_report).resolve()) if args.resume_from_report else None
+    resume_report_notebook_id = None
+    resolved_course_scene = args.course_scene
+    if isinstance(resume_report_payload, dict):
+        raw_notebook_id = resume_report_payload.get("notebook_id")
+        if isinstance(raw_notebook_id, str) and raw_notebook_id.strip():
+            resume_report_notebook_id = raw_notebook_id.strip()
+        raw_course_scene = resume_report_payload.get("course_scene")
+        if not resolved_course_scene and isinstance(raw_course_scene, str) and raw_course_scene.strip():
+            resolved_course_scene = raw_course_scene.strip()
+
+    manifest = load_course_manifest(args.manifest, course_scene=resolved_course_scene)
     if args.max_sections is not None:
         manifest.sections = manifest.sections[: args.max_sections]
     if not manifest.sections:
         raise SystemExit("No sections selected for processing")
 
+    args.course_scene = manifest.course_scene
     course_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     course_dir.mkdir(parents=True, exist_ok=True)
     log_message(f"[course] loaded manifest: {manifest.source_path}")
@@ -222,19 +238,12 @@ def main() -> int:
     log_message(
         f"[course] output directory: {course_dir} | max_concurrency={args.max_concurrency} | "
         f"max_sections={args.max_sections or 'all'} | prepare_only={args.prepare_only} | "
-        f"api_delay_seconds={args.api_delay_seconds} | resume_from_report={bool(args.resume_from_report)}"
+        f"api_delay_seconds={args.api_delay_seconds} | resume_from_report={bool(args.resume_from_report)} | "
+        f"course_scene={manifest.course_scene}"
     )
 
     ensure_authenticated(profile=args.profile, dry_run=args.dry_run)
     log_message("[course] authentication check complete")
-
-    resume_states = load_resume_states(args.resume_from_report)
-    resume_report_payload = read_json(Path(args.resume_from_report).resolve()) if args.resume_from_report else None
-    resume_report_notebook_id = None
-    if isinstance(resume_report_payload, dict):
-        raw_notebook_id = resume_report_payload.get("notebook_id")
-        if isinstance(raw_notebook_id, str) and raw_notebook_id.strip():
-            resume_report_notebook_id = raw_notebook_id.strip()
     notebook_id = args.notebook_id or resume_report_notebook_id
     notebook_id = notebook_id or create_notebook(
         args.notebook_title or manifest.course_title,
@@ -334,6 +343,7 @@ def main() -> int:
     report = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,
+        "course_scene": manifest.course_scene,
         "output_dir": str(course_dir),
         "notebook_id": notebook_id,
         "max_concurrency": args.max_concurrency,

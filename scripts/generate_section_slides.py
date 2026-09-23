@@ -9,11 +9,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Mapping
 
 from common import (
     Section,
     add_text_source,
-    build_focus_prompt,
     configure_nlm_api_delay,
     create_slide_deck,
     default_output_name,
@@ -23,7 +23,9 @@ from common import (
     find_section,
     load_course_manifest,
     log_message,
+    normalize_course_scene,
     rename_artifact,
+    resolve_section_focus,
     sanitize_filename,
     wait_for_artifact,
     write_json,
@@ -40,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--content-file", help="UTF-8 text/markdown file for section content")
     parser.add_argument("--content", help="Inline section content when not using --manifest")
     parser.add_argument("--focus", help="Custom focus prompt for slide generation")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--resource-title", help="Override NotebookLM source title")
     parser.add_argument("--output-name", help="Override output PPTX filename")
     parser.add_argument("--source-id", help="Reuse an existing NotebookLM source ID")
@@ -61,12 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_section(args: argparse.Namespace) -> Section:
+def load_section(args: argparse.Namespace) -> tuple[Section, str | None]:
     if args.manifest:
         if not args.section_id:
             raise SystemExit("--section-id is required when --manifest is used")
-        manifest = load_course_manifest(args.manifest)
-        return find_section(manifest, args.section_id)
+        manifest = load_course_manifest(args.manifest, course_scene=args.course_scene)
+        return find_section(manifest, args.section_id), manifest.course_scene
 
     if not args.title:
         raise SystemExit("--title is required when --manifest is not used")
@@ -77,17 +80,20 @@ def load_section(args: argparse.Namespace) -> Section:
     if args.content_file:
         content = Path(args.content_file).read_text(encoding="utf-8")
 
-    return Section(
-        id="1",
-        order=1,
-        title=args.title,
-        content=(content or "").strip(),
-        slug=sanitize_filename(args.title),
-        output_name=args.output_name or default_output_name("1", args.title),
+    return (
+        Section(
+            id="1",
+            order=1,
+            title=args.title,
+            content=(content or "").strip(),
+            slug=sanitize_filename(args.title),
+            output_name=args.output_name or default_output_name("1", args.title),
+        ),
+        args.course_scene,
     )
 
 
-def emit_result(payload: dict[str, object]) -> None:
+def emit_result(payload: Mapping[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
@@ -96,14 +102,19 @@ def main() -> int:
     if args.api_delay_seconds < 0:
         raise SystemExit("--api-delay-seconds must be at least 0")
     configure_nlm_api_delay(args.api_delay_seconds)
-    section = load_section(args)
+    section, course_scene = load_section(args)
+    course_scene = normalize_course_scene(course_scene)
     output_dir = Path(args.output_dir).resolve()
     output_name = args.output_name or section.output_name
     output_path = output_dir / output_name
     metadata_path = output_path.with_suffix(".slide.json")
     resource_title = args.resource_title or section.resource_title or default_resource_title(section.id, section.title)
     artifact_title = Path(output_name).stem
-    focus = args.focus or section.focus or build_focus_prompt(section.title)
+    focus = resolve_section_focus(
+        section,
+        course_scene=course_scene,
+        explicit_focus=args.focus,
+    )
     source_id = None
     artifact_id = None
     current_step = "initialize"
@@ -162,6 +173,8 @@ def main() -> int:
             elif not args.download_only:
                 current_step = "create_slide_deck"
                 log_message(f"[section {section.id}] create slide deck")
+                if source_id is None:
+                    raise RuntimeError("source_id was not prepared before slide creation")
                 artifact_id = create_slide_deck(
                     args.notebook_id,
                     source_id=source_id,
@@ -177,6 +190,8 @@ def main() -> int:
             if not args.download_only:
                 current_step = "wait_for_artifact"
                 log_message(f"[section {section.id}] wait for slide deck completion")
+                if artifact_id is None:
+                    raise RuntimeError("artifact_id was not prepared before artifact polling")
                 wait_for_artifact(
                     args.notebook_id,
                     artifact_id,
@@ -190,6 +205,8 @@ def main() -> int:
             if not args.skip_rename:
                 current_step = "rename_artifact"
                 log_message(f"[section {section.id}] rename artifact: {artifact_title}")
+                if artifact_id is None:
+                    raise RuntimeError("artifact_id was not prepared before rename")
                 rename_artifact(
                     artifact_id,
                     artifact_title,
@@ -199,6 +216,8 @@ def main() -> int:
 
             current_step = "download_slide_deck"
             log_message(f"[section {section.id}] download slide deck: {output_path}")
+            if artifact_id is None:
+                raise RuntimeError("artifact_id was not prepared before download")
             download_slide_deck(
                 args.notebook_id,
                 artifact_id,
@@ -220,6 +239,7 @@ def main() -> int:
             "section_id": section.id,
             "section_title": section.title,
             "resource_title": resource_title,
+            "course_scene": course_scene,
             "focus": focus,
             "notebook_id": args.notebook_id,
             "source_id": source_id,
@@ -244,6 +264,7 @@ def main() -> int:
             "section_id": section.id,
             "section_title": section.title,
             "resource_title": resource_title,
+            "course_scene": course_scene,
             "focus": focus,
             "notebook_id": args.notebook_id,
             "source_id": source_id,
