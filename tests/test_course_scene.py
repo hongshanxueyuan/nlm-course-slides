@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import common  # noqa: E402
 import create_slides_from_sources  # noqa: E402
+import generate_course_slides  # noqa: E402
+import generate_recovery_report  # noqa: E402
 import generate_section_slides  # noqa: E402
 import list_course_sections  # noqa: E402
 
@@ -54,6 +57,75 @@ class CourseSceneManifestTest(unittest.TestCase):
 
 
 class CourseSceneWorkflowTest(unittest.TestCase):
+    def test_recovery_report_reuses_course_scene_from_prior_stage_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            output_dir = root / "out"
+            upload_report_path = output_dir / "upload-report.json"
+            recovery_report_path = output_dir / "recovery-report.json"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "sections": [
+                            {
+                                "id": "1",
+                                "title": "1.1 测试小节",
+                                "content": "## 标题\n\n正文",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            upload_report_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "course_scene": "出海",
+                        "results": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            captured: dict[str, str] = {}
+
+            def fake_match_sections(manifest, **_kwargs):
+                captured["course_scene"] = manifest.course_scene
+                return []
+
+            argv = [
+                "generate_recovery_report.py",
+                str(manifest_path),
+                "--notebook-id",
+                "notebook-1",
+                "--output-dir",
+                str(output_dir),
+                "--report-path",
+                str(recovery_report_path),
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch("generate_recovery_report.ensure_authenticated"),
+                patch(
+                    "generate_recovery_report.match_sections_to_notebook_state",
+                    side_effect=fake_match_sections,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = generate_recovery_report.main()
+
+            self.assertEqual(0, exit_code)
+            payload = json.loads(recovery_report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual("出海", captured["course_scene"])
+        self.assertEqual("出海", payload["course_scene"])
+
     def test_stage_b_records_course_scene_from_cli_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -164,6 +236,177 @@ class CourseSceneWorkflowTest(unittest.TestCase):
 
         self.assertEqual("出海", payload["course_scene"])
         self.assertIn("中国出海企业员工", captured["focus"])
+
+    def test_resume_report_propagates_course_scene_to_section_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            output_dir = root / "out"
+            resume_report_path = root / "recovery-report.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "sections": [
+                            {
+                                "id": "1",
+                                "title": "1.1 测试小节",
+                                "content": "## 标题\n\n正文",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            resume_report_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "notebook_id": "notebook-1",
+                        "course_scene": "出海",
+                        "results": [
+                            {
+                                "section_id": "1",
+                                "status": "source_only",
+                                "resume_action": "create_from_existing_source",
+                                "source_id": "source-1",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            captured: dict[str, list[str]] = {}
+
+            def fake_run_section(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+                captured["cmd"] = cmd
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "status": "create_requested",
+                            "section_id": "1",
+                            "section_title": "1.1 测试小节",
+                            "artifact_id": "artifact-1",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    stderr="",
+                )
+
+            argv = [
+                "generate_course_slides.py",
+                str(manifest_path),
+                "--resume-from-report",
+                str(resume_report_path),
+                "--output-dir",
+                str(output_dir),
+                "--max-concurrency",
+                "1",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch("generate_course_slides.ensure_authenticated"),
+                patch("generate_course_slides.run_section", side_effect=fake_run_section),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = generate_course_slides.main()
+
+            self.assertEqual(0, exit_code)
+            payload = json.loads((output_dir / "slide-generation-report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("出海", payload["course_scene"])
+        self.assertIn("--course-scene", captured["cmd"])
+        self.assertEqual("出海", captured["cmd"][captured["cmd"].index("--course-scene") + 1])
+
+    def test_resume_report_without_course_scene_defaults_to_standard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            output_dir = root / "out"
+            resume_report_path = root / "legacy-recovery-report.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "sections": [
+                            {
+                                "id": "1",
+                                "title": "1.1 测试小节",
+                                "content": "## 标题\n\n正文",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            resume_report_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "notebook_id": "notebook-1",
+                        "results": [
+                            {
+                                "section_id": "1",
+                                "status": "source_only",
+                                "resume_action": "create_from_existing_source",
+                                "source_id": "source-1",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            captured: dict[str, list[str]] = {}
+
+            def fake_run_section(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+                captured["cmd"] = cmd
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "status": "create_requested",
+                            "section_id": "1",
+                            "section_title": "1.1 测试小节",
+                            "artifact_id": "artifact-1",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    stderr="",
+                )
+
+            argv = [
+                "generate_course_slides.py",
+                str(manifest_path),
+                "--resume-from-report",
+                str(resume_report_path),
+                "--output-dir",
+                str(output_dir),
+                "--max-concurrency",
+                "1",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch("generate_course_slides.ensure_authenticated"),
+                patch("generate_course_slides.run_section", side_effect=fake_run_section),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = generate_course_slides.main()
+
+            self.assertEqual(0, exit_code)
+            payload = json.loads((output_dir / "slide-generation-report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("标准", payload["course_scene"])
+        self.assertIn("--course-scene", captured["cmd"])
+        self.assertEqual("标准", captured["cmd"][captured["cmd"].index("--course-scene") + 1])
 
     def test_single_section_explicit_focus_overrides_course_scene(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
