@@ -53,7 +53,10 @@ class CourseSceneManifestTest(unittest.TestCase):
         overseas_prompt = common.build_focus_prompt("1.1 测试小节", course_scene="企业出海场景")
 
         self.assertIn("流程与智能化中的企业领导者", standard_prompt)
+        self.assertIn("请严格按来源文档中的分页标识逐页生成对应的演示文稿", standard_prompt)
+        self.assertNotIn("来源文档说明：", standard_prompt)
         self.assertIn("中国出海企业员工", overseas_prompt)
+        self.assertIn("【核心分页与结构约束】：", overseas_prompt)
 
     def test_normalize_course_scene_supports_legacy_aliases(self) -> None:
         self.assertEqual("企业流程与智能化场景", common.normalize_course_scene("标准"))
