@@ -46,14 +46,20 @@ class CourseSceneManifestTest(unittest.TestCase):
 
             manifest = common.load_course_manifest(manifest_path)
 
-        self.assertEqual("标准", manifest.course_scene)
+        self.assertEqual("企业流程与智能化场景", manifest.course_scene)
 
     def test_build_focus_prompt_supports_course_scene_templates(self) -> None:
-        standard_prompt = common.build_focus_prompt("1.1 测试小节", course_scene="标准")
-        overseas_prompt = common.build_focus_prompt("1.1 测试小节", course_scene="出海")
+        standard_prompt = common.build_focus_prompt("1.1 测试小节", course_scene="企业流程与智能化场景")
+        overseas_prompt = common.build_focus_prompt("1.1 测试小节", course_scene="企业出海场景")
 
         self.assertIn("流程与智能化中的企业领导者", standard_prompt)
         self.assertIn("中国出海企业员工", overseas_prompt)
+
+    def test_normalize_course_scene_supports_legacy_aliases(self) -> None:
+        self.assertEqual("企业流程与智能化场景", common.normalize_course_scene("标准"))
+        self.assertEqual("企业流程与智能化场景", common.normalize_course_scene("企业流程与智能化"))
+        self.assertEqual("企业出海场景", common.normalize_course_scene("出海"))
+        self.assertEqual("企业出海场景", common.normalize_course_scene("企业出海"))
 
 
 class CourseSceneWorkflowTest(unittest.TestCase):
@@ -85,7 +91,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
                 json.dumps(
                     {
                         "course_title": "测试课程",
-                        "course_scene": "出海",
+                        "course_scene": "企业出海场景",
                         "results": [],
                     },
                     ensure_ascii=False,
@@ -123,8 +129,8 @@ class CourseSceneWorkflowTest(unittest.TestCase):
             self.assertEqual(0, exit_code)
             payload = json.loads(recovery_report_path.read_text(encoding="utf-8"))
 
-        self.assertEqual("出海", captured["course_scene"])
-        self.assertEqual("出海", payload["course_scene"])
+        self.assertEqual("企业出海场景", captured["course_scene"])
+        self.assertEqual("企业出海场景", payload["course_scene"])
 
     def test_stage_b_records_course_scene_from_cli_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -157,7 +163,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
                 "--report-path",
                 str(report_path),
                 "--course-scene",
-                "出海",
+                "企业出海场景",
             ]
             with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
                 exit_code = list_course_sections.main()
@@ -165,7 +171,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
             self.assertEqual(0, exit_code)
             payload = json.loads(report_path.read_text(encoding="utf-8"))
 
-        self.assertEqual("出海", payload["course_scene"])
+        self.assertEqual("企业出海场景", payload["course_scene"])
 
     def test_stage_d_uses_course_scene_from_upload_report_when_focus_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,7 +200,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
                     {
                         "course_title": "测试课程",
                         "notebook_id": "notebook-1",
-                        "course_scene": "出海",
+                        "course_scene": "企业出海场景",
                         "results": [
                             {
                                 "section_id": "1",
@@ -234,7 +240,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
             self.assertEqual(0, exit_code)
             payload = json.loads(report_path.read_text(encoding="utf-8"))
 
-        self.assertEqual("出海", payload["course_scene"])
+        self.assertEqual("企业出海场景", payload["course_scene"])
         self.assertIn("中国出海企业员工", captured["focus"])
 
     def test_resume_report_propagates_course_scene_to_section_runs(self) -> None:
@@ -264,7 +270,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
                     {
                         "course_title": "测试课程",
                         "notebook_id": "notebook-1",
-                        "course_scene": "出海",
+                        "course_scene": "企业出海场景",
                         "results": [
                             {
                                 "section_id": "1",
@@ -319,9 +325,12 @@ class CourseSceneWorkflowTest(unittest.TestCase):
             self.assertEqual(0, exit_code)
             payload = json.loads((output_dir / "slide-generation-report.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("出海", payload["course_scene"])
+        self.assertEqual("企业出海场景", payload["course_scene"])
         self.assertIn("--course-scene", captured["cmd"])
-        self.assertEqual("出海", captured["cmd"][captured["cmd"].index("--course-scene") + 1])
+        self.assertEqual(
+            "企业出海场景",
+            captured["cmd"][captured["cmd"].index("--course-scene") + 1],
+        )
 
     def test_resume_report_without_course_scene_defaults_to_standard(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,9 +413,12 @@ class CourseSceneWorkflowTest(unittest.TestCase):
             self.assertEqual(0, exit_code)
             payload = json.loads((output_dir / "slide-generation-report.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("标准", payload["course_scene"])
+        self.assertEqual("企业流程与智能化场景", payload["course_scene"])
         self.assertIn("--course-scene", captured["cmd"])
-        self.assertEqual("标准", captured["cmd"][captured["cmd"].index("--course-scene") + 1])
+        self.assertEqual(
+            "企业流程与智能化场景",
+            captured["cmd"][captured["cmd"].index("--course-scene") + 1],
+        )
 
     def test_single_section_explicit_focus_overrides_course_scene(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -422,7 +434,7 @@ class CourseSceneWorkflowTest(unittest.TestCase):
                 "--content",
                 "## 标题\n\n正文",
                 "--course-scene",
-                "出海",
+                "企业出海场景",
                 "--focus",
                 "这是显式 focus",
             ]
