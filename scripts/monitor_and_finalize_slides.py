@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notebook-id", help="Existing notebook ID or alias")
     parser.add_argument("--output-dir", help="Course output directory")
     parser.add_argument("--report-path", help="Optional finalize report output path")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--profile", help="NotebookLM profile")
     parser.add_argument("--poll-interval", type=float, default=60.0)
     parser.add_argument("--timeout-seconds", type=float, default=1800.0)
@@ -216,10 +217,13 @@ def _run_local_postprocess(
 
 def main() -> int:
     args = build_parser().parse_args()
-    manifest = load_course_manifest(args.manifest)
+    create_report = read_json(Path(args.create_report).resolve())
+    manifest = load_course_manifest(
+        args.manifest,
+        course_scene=args.course_scene or create_report.get("course_scene"),
+    )
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    create_report = read_json(Path(args.create_report).resolve())
     notebook_id = args.notebook_id or str(create_report.get("notebook_id") or "").strip()
     if not notebook_id:
         raise SystemExit("Notebook ID is required via --notebook-id or create-report.json")
@@ -327,6 +331,7 @@ def main() -> int:
     payload = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,
+        "course_scene": manifest.course_scene,
         "output_dir": str(output_dir),
         "notebook_id": notebook_id,
         "generated_at": utc_timestamp(),

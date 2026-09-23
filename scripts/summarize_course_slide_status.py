@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--create-report", help="Stage-D create-report.json")
     parser.add_argument("--finalize-report", help="Stage-E/F finalize-report.json")
     parser.add_argument("--report-path", help="Optional summary report output path")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--failed-only", action="store_true", help="Only emit failed items in the summary output")
     return parser
 
@@ -74,13 +75,27 @@ def _retry_from_stage(status: str) -> str | None:
 
 def main() -> int:
     args = build_parser().parse_args()
-    manifest = load_course_manifest(args.manifest)
+    upload_report_path = Path(args.upload_report).resolve() if args.upload_report else None
+    create_report_path = Path(args.create_report).resolve() if args.create_report else None
+    finalize_report_path = Path(args.finalize_report).resolve() if args.finalize_report else None
+    upload_payload = read_json(upload_report_path) if upload_report_path and upload_report_path.exists() else {}
+    create_payload = read_json(create_report_path) if create_report_path and create_report_path.exists() else {}
+    finalize_payload = read_json(finalize_report_path) if finalize_report_path and finalize_report_path.exists() else {}
+    manifest = load_course_manifest(
+        args.manifest,
+        course_scene=(
+            args.course_scene
+            or finalize_payload.get("course_scene")
+            or create_payload.get("course_scene")
+            or upload_payload.get("course_scene")
+        ),
+    )
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    upload_results = _load_results(Path(args.upload_report).resolve() if args.upload_report else output_dir / "upload-report.json")
-    create_results = _load_results(Path(args.create_report).resolve() if args.create_report else output_dir / "create-report.json")
-    finalize_results = _load_results(Path(args.finalize_report).resolve() if args.finalize_report else output_dir / "finalize-report.json")
+    upload_results = _load_results(upload_report_path if upload_report_path else output_dir / "upload-report.json")
+    create_results = _load_results(create_report_path if create_report_path else output_dir / "create-report.json")
+    finalize_results = _load_results(finalize_report_path if finalize_report_path else output_dir / "finalize-report.json")
 
     sections = []
     failed_items = []
@@ -122,6 +137,7 @@ def main() -> int:
     payload = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,
+        "course_scene": manifest.course_scene,
         "output_dir": str(output_dir),
         "generated_at": utc_timestamp(),
         "status_counts": status_counts,

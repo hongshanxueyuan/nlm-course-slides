@@ -12,13 +12,13 @@ import time
 from pathlib import Path
 
 from common import (
-    build_focus_prompt,
     configure_nlm_api_delay,
     create_slide_deck,
     ensure_authenticated,
     find_section,
     load_course_manifest,
     read_json,
+    resolve_section_focus,
     sanitize_filename,
     utc_timestamp,
     write_json,
@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notebook-id", help="Existing notebook ID or alias")
     parser.add_argument("--output-dir", help="Course output directory")
     parser.add_argument("--report-path", help="Optional create report output path")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--profile", help="NotebookLM profile")
     parser.add_argument("--language", default="zh_Hans")
     parser.add_argument("--deck-format", default="detailed_deck")
@@ -60,10 +61,13 @@ def main() -> int:
         raise SystemExit("--api-delay-seconds must be at least 0")
 
     configure_nlm_api_delay(args.api_delay_seconds)
-    manifest = load_course_manifest(args.manifest)
+    upload_report = read_json(Path(args.upload_report).resolve())
+    manifest = load_course_manifest(
+        args.manifest,
+        course_scene=args.course_scene or upload_report.get("course_scene"),
+    )
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    upload_report = read_json(Path(args.upload_report).resolve())
     notebook_id = args.notebook_id or str(upload_report.get("notebook_id") or "").strip()
     if not notebook_id:
         raise SystemExit("Notebook ID is required via --notebook-id or upload-report.json")
@@ -118,7 +122,10 @@ def main() -> int:
             artifact_id = create_slide_deck(
                 notebook_id,
                 source_id=source_id,
-                focus=section.focus or build_focus_prompt(section.title),
+                focus=resolve_section_focus(
+                    section,
+                    course_scene=manifest.course_scene,
+                ),
                 language=args.language,
                 deck_format=args.deck_format,
                 length=args.length,
@@ -154,6 +161,7 @@ def main() -> int:
     payload = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,
+        "course_scene": manifest.course_scene,
         "output_dir": str(output_dir),
         "notebook_id": notebook_id,
         "generated_at": utc_timestamp(),

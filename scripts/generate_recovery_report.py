@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notebook-id", required=True, help="Existing notebook ID or alias")
     parser.add_argument("--output-dir", help="Course output directory")
     parser.add_argument("--report-path", help="Optional recovery report path")
+    parser.add_argument("--course-scene", help="Course scene override")
     parser.add_argument("--profile", help="NotebookLM profile")
     parser.add_argument("--api-delay-seconds", type=float, default=15.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -40,7 +41,7 @@ def main() -> int:
         raise SystemExit("--api-delay-seconds must be at least 0")
 
     configure_nlm_api_delay(args.api_delay_seconds)
-    manifest = load_course_manifest(args.manifest)
+    manifest = load_course_manifest(args.manifest, course_scene=args.course_scene)
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -63,6 +64,7 @@ def main() -> int:
     report = {
         "manifest": manifest.source_path,
         "course_title": manifest.course_title,
+        "course_scene": manifest.course_scene,
         "output_dir": str(output_dir),
         "notebook_id": args.notebook_id,
         "generated_at": utc_timestamp(),

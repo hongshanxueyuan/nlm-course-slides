@@ -17,10 +17,17 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
+
+
+class _FcntlLike(Protocol):
+    LOCK_EX: int
+    LOCK_UN: int
+
+    def flock(self, fd: int, op: int) -> None: ...
 
 try:
-    import fcntl
+    import fcntl as _fcntl
 except ImportError:  # pragma: no cover - Windows fallback
     class _FcntlCompat:
         LOCK_EX = 0
@@ -30,7 +37,9 @@ except ImportError:  # pragma: no cover - Windows fallback
         def flock(_fd: int, _op: int) -> None:
             return None
 
-    fcntl = _FcntlCompat()
+    fcntl: _FcntlLike = _FcntlCompat()
+else:
+    fcntl = cast(_FcntlLike, _fcntl)
 
 
 UUID_RE = re.compile(
@@ -47,7 +56,14 @@ SECTION_PREFIX_RE = re.compile(
     r")\s*"
 )
 
-FOCUS_PROMPT_TEMPLATE = """文稿题目：{section_title}
+COURSE_SCENE_STANDARD = "标准"
+COURSE_SCENE_OVERSEAS = "出海"
+COURSE_SCENE_ALIASES = {
+    COURSE_SCENE_STANDARD: COURSE_SCENE_STANDARD,
+    COURSE_SCENE_OVERSEAS: COURSE_SCENE_OVERSEAS,
+}
+
+STANDARD_FOCUS_PROMPT_TEMPLATE = """文稿题目：{section_title}
 目标受众：流程与智能化中的企业领导者、企业各个部门业务负责人、企业流程与IT部门员工、人工智能变革项目管理者。请使用面向管理者与变革参与者的专业中文，兼顾业务理解、流程协同与落地执行。
 来源文档说明：这是企业流程智能化培训解决方案。本解决方案旨在企业流程框架（参见企业流程框架基础解决方案）的基础上，讲解人工智能对企业流程的设计、实施、运营所产生的深刻影响。课程为流程与智能化中的管理者和参与数智变革的人员提供数智化基础理论、实操建议和案例研究。
 生成要求：请根据来源文档生成演示文稿，演示文稿要和来源文档的逻辑、观点与核心内容严格对应，帮助学员边看演示文稿边听讲解时，更提纲挈领地理解关键机制、方法、判断依据与管理动作，并据此推动实际变革。开篇尽量简洁，直入主题。必须遵循来源文档中的专业术语和定义。
@@ -73,6 +89,24 @@ FOCUS_PROMPT_TEMPLATE = """文稿题目：{section_title}
 视觉效果要求：遵循极简的商务视觉原则，以现代企业扁平线性矢量插图为主，构图上合理留白，营造舒适的视觉呼吸感。全文稿任何地方都严禁放任何徽标（Logo）。
 底版强制要求：全部演示文稿的底版必须统一为纯白色（#FFFFFF），底版区域禁止出现任何底纹、网格线、辅助线、水印、杂色及各类装饰性背景元素，保证底版干净无杂质。
 配图、图标等须使用品牌色，即绿色（RGB 0-176-80），橙色（RGB 255-153-0），蓝色（RGB 51-153-255），可适当加入浅绿色（RGB 97-209-116）、浅橙色（RGB 255-194-102）、浅蓝色（RGB 153-204-255），严禁使用粉色系颜色。"""
+
+OVERSEAS_FOCUS_PROMPT_TEMPLATE = """文稿题目：{section_title}
+目标受众：中国出海企业员工。 用他们能够听懂的语言，用生动又不失专业性的表达方式来深入讲解。
+来源文档是给中国出海企业员工的课程内容。请根据来源文档生成演示文稿，演示文稿要和来源文档的逻辑与核心内容严格对应，目的是让学员边看演示文稿，边听来源文档的讲解，支持他们更提纲挈领的领会来源文档的要点，从而根据自身实际情况，采取相应的行动。
+开篇尽量简洁，直入主题。
+必须遵循来源文档中的专业用语和定义。
+页数要求：10-16页，用适当的文字讲解主要内容。
+不要浪费页面讲口号，要讲具体的要点和方法。
+演示文稿只使用中文，严禁出现除了中文之外的任何其他语言、字母。特殊情况：若出现电话号码，使用阿拉伯数字。
+取消结尾页。
+视觉效果要求: 遵循极简的商务视觉原则，以现代企业扁平线性矢量插图为主，构图上合理留白，营造舒适的视觉呼吸感。全文稿任何地方都严禁放任何徽标（Logo）。
+底版强制要求：全部演示文稿的底版必须统一为纯白色（#FFFFFF），底版区域禁止出现任何底纹、网格线、辅助线、水印、杂色及各类装饰性背景元素，保证底版干净无杂质。
+配图、图标等须使用品牌色，即绿色（RGB 0-176-80），橙色（RGB 255-153-0），蓝色（RGB 51-153-255），可适当加入浅绿色（RGB 97-209-116）、浅橙色（RGB 255-194-102）、浅蓝色（RGB 153-204-255），严禁使用粉色系颜色。"""
+
+FOCUS_PROMPT_TEMPLATES = {
+    COURSE_SCENE_STANDARD: STANDARD_FOCUS_PROMPT_TEMPLATE,
+    COURSE_SCENE_OVERSEAS: OVERSEAS_FOCUS_PROMPT_TEMPLATE,
+}
 
 FIRA_SKIP_CHAPTER_NAMES = {"训战启程", "训战总结、训战输出", "满意度调查"}
 PROMPT_TITLE_RE = re.compile(r"文稿题目：([^\n\r]+)")
@@ -123,6 +157,7 @@ class CourseManifest:
     course_title: str
     sections: list[Section]
     source_path: str
+    course_scene: str = COURSE_SCENE_STANDARD
     source_kind: str = "generic"
     default_block_type: str = "html"
 
@@ -197,8 +232,33 @@ def strip_section_prefix(title: str) -> str:
     return cleaned or title.strip()
 
 
-def build_focus_prompt(title: str) -> str:
-    return FOCUS_PROMPT_TEMPLATE.format(section_title=strip_section_prefix(title))
+def normalize_course_scene(course_scene: str | None) -> str:
+    normalized = str(course_scene or COURSE_SCENE_STANDARD).strip()
+    if normalized in COURSE_SCENE_ALIASES:
+        return COURSE_SCENE_ALIASES[normalized]
+    raise RuntimeError(
+        f"Unsupported course_scene '{normalized}'. Expected one of: "
+        f"{', '.join(FOCUS_PROMPT_TEMPLATES)}"
+    )
+
+
+def build_focus_prompt(title: str, *, course_scene: str | None = None) -> str:
+    resolved_course_scene = normalize_course_scene(course_scene)
+    template = FOCUS_PROMPT_TEMPLATES[resolved_course_scene]
+    return template.format(section_title=strip_section_prefix(title))
+
+
+def resolve_section_focus(
+    section: Section,
+    *,
+    course_scene: str | None = None,
+    explicit_focus: str | None = None,
+) -> str:
+    return str(
+        explicit_focus
+        or section.focus
+        or build_focus_prompt(section.title, course_scene=course_scene)
+    ).strip()
 
 
 def _normalize_newlines(text: str) -> str:
@@ -1523,11 +1583,16 @@ def manifest_to_dict(manifest: CourseManifest) -> dict[str, Any]:
     return {
         "course_title": manifest.course_title,
         "source_path": manifest.source_path,
+        "course_scene": manifest.course_scene,
         "sections": [asdict(section) for section in manifest.sections],
     }
 
 
-def load_course_manifest(path: str | Path) -> CourseManifest:
+def load_course_manifest(
+    path: str | Path,
+    *,
+    course_scene: str | None = None,
+) -> CourseManifest:
     source = Path(path)
     if not source.exists():
         raise FileNotFoundError(f"Manifest does not exist: {source}")
@@ -1535,29 +1600,42 @@ def load_course_manifest(path: str | Path) -> CourseManifest:
     suffix = source.suffix.lower()
     if suffix == ".json":
         data = json.loads(source.read_text(encoding="utf-8"))
-        return _normalize_manifest(data, source)
+        return _normalize_manifest(data, source, course_scene=course_scene)
     if suffix in {".yaml", ".yml"}:
         try:
-            import yaml
+            import yaml  # type: ignore[import-untyped]
         except ImportError as exc:
             raise RuntimeError(
                 "YAML manifest support requires PyYAML. Install it or use JSON/Markdown."
             ) from exc
         data = yaml.safe_load(source.read_text(encoding="utf-8"))
-        return _normalize_manifest(data, source)
+        return _normalize_manifest(data, source, course_scene=course_scene)
     if suffix == ".md":
-        return _load_markdown_manifest(source)
+        return _load_markdown_manifest(source, course_scene=course_scene)
     raise RuntimeError(
         f"Unsupported manifest extension '{suffix}'. Use .json, .yaml, .yml, or .md."
     )
 
 
-def _normalize_manifest(data: Any, source: Path) -> CourseManifest:
+def _normalize_manifest(
+    data: Any,
+    source: Path,
+    *,
+    course_scene: str | None = None,
+) -> CourseManifest:
     if not isinstance(data, dict):
         raise RuntimeError(f"Manifest root must be an object: {source}")
 
+    resolved_course_scene = normalize_course_scene(
+        course_scene or data.get("course_scene") or data.get("courseScene")
+    )
+
     if isinstance(data.get("chapters"), list):
-        return _load_fira_course_manifest(data, source)
+        return _load_fira_course_manifest(
+            data,
+            source,
+            course_scene=resolved_course_scene,
+        )
 
     course_title = str(data.get("course_title") or data.get("title") or source.stem).strip()
     raw_sections = data.get("sections") or data.get("chapters")
@@ -1661,12 +1739,18 @@ def _normalize_manifest(data: Any, source: Path) -> CourseManifest:
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
+        course_scene=resolved_course_scene,
         source_kind=source.suffix.lower().lstrip(".") or "json",
         default_block_type="html",
     )
 
 
-def _load_fira_course_manifest(data: dict[str, Any], source: Path) -> CourseManifest:
+def _load_fira_course_manifest(
+    data: dict[str, Any],
+    source: Path,
+    *,
+    course_scene: str | None = None,
+) -> CourseManifest:
     course_title = str(data.get("name") or data.get("course_title") or source.stem).strip()
     chapters = data.get("chapters") or []
     if not isinstance(chapters, list):
@@ -1726,6 +1810,7 @@ def _load_fira_course_manifest(data: dict[str, Any], source: Path) -> CourseMani
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
+        course_scene=normalize_course_scene(course_scene),
         source_kind="fira",
         default_block_type=course_block_type,
     )
@@ -1739,7 +1824,11 @@ def extract_fira_section_content(section_data: dict[str, Any]) -> str:
     return content
 
 
-def _load_markdown_manifest(source: Path) -> CourseManifest:
+def _load_markdown_manifest(
+    source: Path,
+    *,
+    course_scene: str | None = None,
+) -> CourseManifest:
     lines = source.read_text(encoding="utf-8").splitlines()
     course_title = source.stem
     sections: list[Section] = []
@@ -1797,6 +1886,7 @@ def _load_markdown_manifest(source: Path) -> CourseManifest:
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
+        course_scene=normalize_course_scene(course_scene),
         source_kind="markdown",
         default_block_type="html",
     )
