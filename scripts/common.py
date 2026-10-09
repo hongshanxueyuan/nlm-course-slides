@@ -88,6 +88,20 @@ FOCUS_PROMPT_TEMPLATES = {
     for scene, path in FOCUS_PROMPT_TEMPLATE_FILES.items()
 }
 
+GLOBAL_SLIDE_TEXT_RULES = (
+    "【所有场景共用的文字与排版要求】：字体、字号、颜色、粗体等均是视觉排版指令，不是页面内容。"
+    "所有幻灯片的可见文字不得包含字体名称或排版说明；标题只保留实际标题文字。"
+    "尤其“黑体”仅表示字体样式，任何场景下都不得出现在幻灯片可见文字中。"
+)
+
+
+def _append_global_slide_text_rules(prompt: str) -> str:
+    normalized = prompt.strip()
+    if GLOBAL_SLIDE_TEXT_RULES in normalized:
+        return normalized
+    return f"{normalized}\n\n{GLOBAL_SLIDE_TEXT_RULES}"
+
+
 FIRA_SKIP_CHAPTER_NAMES = {"训战启程", "训战总结、训战输出", "满意度调查"}
 PROMPT_TITLE_RE = re.compile(r"文稿题目：([^\n\r]+)")
 NLM_API_DELAY_SECONDS = 15.0
@@ -225,7 +239,8 @@ def normalize_course_scene(course_scene: str | None) -> str:
 def build_focus_prompt(title: str, *, course_scene: str | None = None) -> str:
     resolved_course_scene = normalize_course_scene(course_scene)
     template = FOCUS_PROMPT_TEMPLATES[resolved_course_scene]
-    return template.format(section_title=strip_section_prefix(title))
+    prompt = template.format(section_title=strip_section_prefix(title))
+    return _append_global_slide_text_rules(prompt)
 
 
 def resolve_section_focus(
@@ -234,11 +249,12 @@ def resolve_section_focus(
     course_scene: str | None = None,
     explicit_focus: str | None = None,
 ) -> str:
-    return str(
+    focus = str(
         explicit_focus
         or section.focus
         or build_focus_prompt(section.title, course_scene=course_scene)
     ).strip()
+    return _append_global_slide_text_rules(focus)
 
 
 def _normalize_newlines(text: str) -> str:
