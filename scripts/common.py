@@ -309,6 +309,18 @@ def _heading_text(block: str) -> str | None:
     return match.group(1).strip()
 
 
+def _remove_duplicate_cover_heading(pages: list[str], *, title: str) -> list[str]:
+    if not pages or _heading_text(pages[0]) != title:
+        return pages
+
+    remaining_lines = pages[0].splitlines()[1:]
+    remaining_body = "\n".join(remaining_lines).strip()
+    remaining_pages = pages[1:]
+    if remaining_body:
+        return [remaining_body, *remaining_pages]
+    return remaining_pages
+
+
 def _is_summary_block(block: str) -> bool:
     title = _heading_text(block)
     return bool(title and title in SUMMARY_HEADING_TEXTS)
@@ -739,12 +751,14 @@ def materialize_section_markdown(
             f"page_count {section.page_count} does not match len(page_content) {len(pages)} for section {section.id}"
         )
     if include_cover:
+        cover_title = strip_section_prefix(section.title)
+        pages = _remove_duplicate_cover_heading(pages, title=cover_title)
         pages = _collapse_units_to_page_limit(
             pages,
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
             preserve_summary_page=True,
         )
-        pages.insert(0, f"# {strip_section_prefix(section.title)}")
+        pages.insert(0, f"# {cover_title}")
 
     if len(pages) > HTML_PAGINATION_MAX_PAGES:
         raise RuntimeError(
