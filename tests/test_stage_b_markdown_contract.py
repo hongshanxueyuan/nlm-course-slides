@@ -96,7 +96,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual("html", section["block_type"])
         self.assertEqual(section["page_count"], len(section["page_content"]))
         self.assertLessEqual(section["page_count"], 20)
-        self.assertTrue(section["page_content"][0].startswith("## 博弈规则——【法国】合规宽严度与生存策略"))
+        self.assertTrue(section["page_content"][0].startswith("# 博弈规则——【法国】合规宽严度与生存策略"))
         self.assertTrue(section["page_content"][-1].startswith("## 本节要点"))
         for page in section["page_content"]:
             self.assertIsNone(common.PAGE_MARKER_RE.search(page))
@@ -155,11 +155,11 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 section = payload["sections"][0]
                 md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
-                self.assertEqual("## 语义章节标题", section["page_content"][0])
+                self.assertEqual("# 语义章节标题", section["page_content"][0])
                 self.assertEqual(3, section["page_count"])
                 self.assertEqual(section["page_count"], len(section["page_content"]))
                 self._assert_marker_alignment(md_body, section["page_count"])
-                self.assertTrue(md_body.startswith("- 第 1 页\n\n## 语义章节标题"))
+                self.assertTrue(md_body.startswith("- 第 1 页\n\n# 语义章节标题"))
                 self.assertEqual(
                     section["page_content"],
                     common.parse_canonical_markdown_pages(
@@ -213,7 +213,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
             section = json.loads(report_path.read_text(encoding="utf-8"))["sections"][0]
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
-        self.assertEqual("## 物流合作", section["page_content"][0])
+        self.assertEqual("# 物流合作", section["page_content"][0])
         self.assertEqual(20, section["page_count"])
         self.assertEqual(20, len(section["page_content"]))
         self.assertIn("第1页内容。", section["page_content"][1])
@@ -276,7 +276,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
             section = json.loads(report_path.read_text(encoding="utf-8"))["sections"][0]
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
-        self.assertEqual("## 出海章节", section["page_content"][0])
+        self.assertEqual("# 出海章节", section["page_content"][0])
         self.assertEqual(20, section["page_count"])
         self.assertEqual(20, len(section["page_content"]))
         self.assertIn("第1页内容。", section["page_content"][1])
@@ -369,7 +369,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
             self.assertEqual("html", section["block_type"])
             self.assertEqual(
                 [
-                    "## 显式元数据",
+                    "# 显式元数据",
                     "## 第一页\n\n第一页正文。",
                     "## 第二页\n\n第二页正文。",
                 ],
@@ -379,7 +379,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
 
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
             self.assertEqual(
-                "- 第 1 页\n\n## 显式元数据\n\n- 第 2 页\n\n## 第一页\n\n第一页正文。"
+                "- 第 1 页\n\n# 显式元数据\n\n- 第 2 页\n\n## 第一页\n\n第一页正文。"
                 "\n\n- 第 3 页\n\n## 第二页\n\n第二页正文。\n",
                 md_body,
             )
