@@ -744,7 +744,7 @@ def materialize_section_markdown(
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
             preserve_summary_page=True,
         )
-        pages.insert(0, f"## {strip_section_prefix(section.title)}")
+        pages.insert(0, f"# {strip_section_prefix(section.title)}")
 
     if len(pages) > HTML_PAGINATION_MAX_PAGES:
         raise RuntimeError(
