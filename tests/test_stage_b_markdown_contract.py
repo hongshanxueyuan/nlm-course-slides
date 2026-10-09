@@ -111,6 +111,179 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertNotIn("<p>", md_body)
         self.assertNotIn("<h2>", md_body)
 
+    def test_stage_b_prepends_semantic_title_cover_for_both_scenes(self) -> None:
+        for scene in (common.COURSE_SCENE_STANDARD, common.COURSE_SCENE_OVERSEAS):
+            with self.subTest(scene=scene), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                manifest_path = root / "manifest.json"
+                output_dir = root / "out"
+                report_path = output_dir / "section-list.json"
+                manifest_path.write_text(
+                    json.dumps(
+                        {
+                            "course_title": "测试课程",
+                            "course_scene": scene,
+                            "sections": [
+                                {
+                                    "id": "2.3",
+                                    "title": "2.3 语义章节标题",
+                                    "output_name": "与标题无关的文件名.pptx",
+                                    "md_name": "与标题无关的文件名.md",
+                                    "block_type": "imagesgallery",
+                                    "content": "- 第 1 页\n\n## 正文一\n\n第一段。\n\n- 第 2 页\n\n## 正文二\n\n第二段。",
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                argv = [
+                    "list_course_sections.py",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--report-path",
+                    str(report_path),
+                ]
+                with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                    exit_code = list_course_sections.main()
+
+                self.assertEqual(0, exit_code)
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+                section = payload["sections"][0]
+                md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
+
+                self.assertEqual("## 语义章节标题", section["page_content"][0])
+                self.assertEqual(3, section["page_count"])
+                self.assertEqual(section["page_count"], len(section["page_content"]))
+                self._assert_marker_alignment(md_body, section["page_count"])
+                self.assertTrue(md_body.startswith("- 第 1 页\n\n## 语义章节标题"))
+                self.assertEqual(
+                    section["page_content"],
+                    common.parse_canonical_markdown_pages(
+                        md_body,
+                        section_title=section["section_title"],
+                        output_stem=Path(section["md_name"]).stem,
+                    ),
+                )
+
+    def test_stage_b_merges_imagesgallery_pages_before_adding_cover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            output_dir = root / "out"
+            report_path = output_dir / "section-list.json"
+            body_pages = [
+                f"## 正文{i}\n\n第{i}页内容。"
+                for i in range(1, 20)
+            ] + ["## 本节要点\n\n总结内容。"]
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "course_scene": common.COURSE_SCENE_STANDARD,
+                        "sections": [
+                            {
+                                "id": "4.2",
+                                "title": "4.2 物流合作",
+                                "block_type": "imagesgallery",
+                                "content": common.serialize_canonical_markdown(body_pages),
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            argv = [
+                "list_course_sections.py",
+                str(manifest_path),
+                "--output-dir",
+                str(output_dir),
+                "--report-path",
+                str(report_path),
+            ]
+            with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                exit_code = list_course_sections.main()
+
+            self.assertEqual(0, exit_code)
+            section = json.loads(report_path.read_text(encoding="utf-8"))["sections"][0]
+            md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
+
+        self.assertEqual("## 物流合作", section["page_content"][0])
+        self.assertEqual(20, section["page_count"])
+        self.assertEqual(20, len(section["page_content"]))
+        self.assertIn("第1页内容。", section["page_content"][1])
+        self.assertIn("第2页内容。", section["page_content"][1])
+        self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
+        self._assert_marker_alignment(md_body, 20)
+
+    def test_stage_b_reserves_cover_and_merges_adjacent_html_pages_to_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            output_dir = root / "out"
+            report_path = output_dir / "section-list.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "course_scene": common.COURSE_SCENE_OVERSEAS,
+                        "sections": [
+                            {
+                                "id": "1",
+                                "title": "1.1 出海章节",
+                                "content": "来源正文。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            model_pages = [
+                f"## 正文{i}\n\n第{i}页内容。"
+                for i in range(1, 20)
+            ] + ["## 本节要点\n\n总结内容。"]
+
+            def fake_model(prompt: str) -> list[str]:
+                self.assertIn("正文分页结果**不得超过 19 页**", prompt)
+                self.assertNotIn("封面与正文总数", prompt)
+                self.assertNotIn("封面不参与合并", prompt)
+                self.assertNotIn("Stage B", prompt)
+                self.assertNotIn("阶段 B", prompt)
+                return model_pages
+
+            argv = [
+                "list_course_sections.py",
+                str(manifest_path),
+                "--output-dir",
+                str(output_dir),
+                "--report-path",
+                str(report_path),
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch("common._run_html_pagination_model", side_effect=fake_model),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = list_course_sections.main()
+
+            self.assertEqual(0, exit_code)
+            section = json.loads(report_path.read_text(encoding="utf-8"))["sections"][0]
+            md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
+
+        self.assertEqual("## 出海章节", section["page_content"][0])
+        self.assertEqual(20, section["page_count"])
+        self.assertEqual(20, len(section["page_content"]))
+        self.assertIn("第1页内容。", section["page_content"][1])
+        self.assertIn("第2页内容。", section["page_content"][1])
+        self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
+        self._assert_marker_alignment(md_body, 20)
+
     def test_stage_b_rejects_mismatched_explicit_md_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest_path = Path(tmpdir) / "manifest.json"
@@ -195,14 +368,19 @@ class StageBMarkdownContractTest(unittest.TestCase):
             self.assertEqual("1.1 显式元数据.md", section["md_name"])
             self.assertEqual("html", section["block_type"])
             self.assertEqual(
-                ["## 第一页\n\n第一页正文。", "## 第二页\n\n第二页正文。"],
+                [
+                    "## 显式元数据",
+                    "## 第一页\n\n第一页正文。",
+                    "## 第二页\n\n第二页正文。",
+                ],
                 section["page_content"],
             )
-            self.assertEqual(2, section["page_count"])
+            self.assertEqual(3, section["page_count"])
 
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
             self.assertEqual(
-                "- 第 1 页\n\n## 第一页\n\n第一页正文。\n\n- 第 2 页\n\n## 第二页\n\n第二页正文。\n",
+                "- 第 1 页\n\n## 显式元数据\n\n- 第 2 页\n\n## 第一页\n\n第一页正文。"
+                "\n\n- 第 3 页\n\n## 第二页\n\n第二页正文。\n",
                 md_body,
             )
 
@@ -244,7 +422,10 @@ class StageBMarkdownContractTest(unittest.TestCase):
         def fake_model(prompt: str) -> list[str]:
             self.assertIn("## 任务描述", prompt)
             self.assertIn("不要根据文件名、`output_name`、`md_name` 或 section 标题再额外生成一个包裹性的文档总标题。", prompt)
-            self.assertIn("最终总页数**不得超过 20 页**", prompt)
+            self.assertIn("不生成开头页、结尾页、文件名页或额外封面页，避免冗余内容。", prompt)
+            self.assertIn("正文分页结果**不得超过 19 页**", prompt)
+            self.assertNotIn("{max_body_pages}", prompt)
+            self.assertNotIn("封面与正文总页数", prompt)
             self.assertIn(markdown, prompt)
             self.assertNotIn("{text}", prompt)
             return ["## 标题\n\n第一页正文。"]
@@ -253,6 +434,20 @@ class StageBMarkdownContractTest(unittest.TestCase):
             pages = common.paginate_markdown_content(markdown)
 
         self.assertEqual(["## 标题\n\n第一页正文。"], pages)
+
+    def test_html_pagination_caps_body_at_19_pages_before_cover_is_added(self) -> None:
+        markdown = "## 标题\n\n正文。"
+        model_pages = [f"## 正文{i}\n\n内容。" for i in range(1, 21)]
+
+        def fake_model(prompt: str) -> list[str]:
+            self.assertIn("正文分页结果**不得超过 19 页**", prompt)
+            self.assertNotIn("封面与正文总页数", prompt)
+            return model_pages
+
+        with patch("common._run_html_pagination_model", side_effect=fake_model):
+            pages = common.paginate_markdown_content(markdown)
+
+        self.assertEqual(19, len(pages))
 
 
 class StageCMarkdownUploadTest(unittest.TestCase):
