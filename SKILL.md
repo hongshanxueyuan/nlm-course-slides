@@ -36,7 +36,7 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 - 输入优先使用本地 JSON；如果用户给的是 `tenant_id + course_id`，先完成约定样例的 MCP 验证；验证通过后，再调用 `fira-insights` 的 `get_course_content_json`，并按下游用途显式传 `html_block_render_mode`：默认用 `markdown`，只有用户明确需要原始 HTML 标签时才用 `html`，再把返回的 `signed_url` 下载到本地课程目录。
 - 课程结构解析继续沿用现有 manifest/FIRA 解析逻辑与 skip 规则；只有叶子 section 会进入后续阶段。
 - 对 HTML xblock 为主的课程，只有在上面的 MCP 验证通过后，才把 `markdown` 渲染模式作为默认正式调用路径，让导出的 `text` 字段保留标题、强调、列表和段落结构；如果下游明确要消费原始标签，再切到 `html` 渲染模式；如果仍在验证前阶段，继续沿用旧路径或先停在验证环节。
-- 阶段 B 里如果 section 走 `html` 路线，分页规则固定读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它是 skill 自带的分页 prompt 资产，不要临时改用别的分页说明。
+- 阶段 B 里如果 section 走 `html` 路线，分页前读取独立规则文件 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它与发给 NotebookLM 的场景 `.txt` prompt 属于不同处理步骤，分别维护。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
 - 如果需要本地下载后处理，默认使用 skill 自带的 `assets/logo.png`；如果用户需要换图标，在阶段 F 传 `--postprocess-image-path <absolute-path>`。
 
@@ -83,7 +83,10 @@ python3 scripts/prepare_course_json.py \
 补充说明：
 
 - 对 `imagesgallery` 路线，阶段 B 直接规范化已有分页文本。
-- 对 `html` 路线，阶段 B 会读取 [references/html-pagination-rules.md](references/html-pagination-rules.md) 作为分页 prompt/规则资产，把 Markdown 教学正文切成 canonical page 内容，再写入 `section-list.json` 和对应 `.md` 文件。
+- 对 `html` 路线，阶段 B 会读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)，把 Markdown 教学正文切成 canonical page 内容，再写入 `section-list.json` 和对应 `.md` 文件。该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
+- 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
+- 正文分页结果最多 19 页；封面由程序随后插入，最终页面列表最多 20 页。超限时只合并相邻正文页，封面不参与合并。
+- 最终页面列表同时生成 canonical Markdown 和 `section-list.json`；`page_count` 必须等于 `page_content` 条数及 Markdown 页标记数。下游 `ppt-to-imagesgallery` 继续按 `page_count`、`page_content` 和真实 PPT 页数匹配处理。
 
 命令：
 
@@ -341,6 +344,8 @@ python3 scripts/summarize_course_slide_status.py \
 
 - [references/manifest-format.md](references/manifest-format.md)
 - [references/html-pagination-rules.md](references/html-pagination-rules.md)
+- [prompts/企业流程与智能化场景.txt](prompts/企业流程与智能化场景.txt)
+- [prompts/企业出海场景.txt](prompts/企业出海场景.txt)
 
 ## Local Download Post-Processing
 

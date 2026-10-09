@@ -101,10 +101,12 @@ HTML_TAG_RE = re.compile(r"<[A-Za-z/!][^>]*>")
 EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
 SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
+HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_COMMAND_ENV = "NLM_HTML_PAGINATION_COMMAND"
 HTML_PAGINATION_RULES_PATH = (
     Path(__file__).resolve().parent.parent / "references" / "html-pagination-rules.md"
 )
+COURSE_SCENES_WITH_COVER = frozenset({COURSE_SCENE_STANDARD, COURSE_SCENE_OVERSEAS})
 
 
 @dataclass
@@ -462,7 +464,11 @@ def _run_html_pagination_model(prompt: str) -> list[str] | None:
     return _parse_html_pagination_model_output(result.stdout)
 
 
-def _paginate_markdown_content_with_rules(text: str, *, rules: str) -> list[str]:
+def _paginate_markdown_content_with_rules(
+    text: str,
+    *,
+    rules: str,
+) -> list[str]:
     normalized = _clean_page_body(text)
     if not normalized:
         raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
@@ -475,14 +481,14 @@ def _paginate_markdown_content_with_rules(text: str, *, rules: str) -> list[str]
 
     pages = _collapse_units_to_page_limit(
         expanded_units,
-        max_pages=HTML_PAGINATION_MAX_PAGES,
+        max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
         preserve_summary_page=_requires_summary_tail_preservation(rules),
     )
     normalized_pages = [_clean_page_body(page) for page in pages if _clean_page_body(page)]
     if not normalized_pages:
         raise RuntimeError("html pagination did not produce any pages")
-    if len(normalized_pages) > HTML_PAGINATION_MAX_PAGES:
-        raise RuntimeError("html pagination exceeded the 20-page contract")
+    if len(normalized_pages) > HTML_PAGINATION_COVER_BODY_MAX_PAGES:
+        raise RuntimeError("html pagination exceeded the 19-page body contract")
     return normalized_pages
 
 
@@ -495,10 +501,15 @@ def paginate_markdown_content(text: str) -> list[str]:
     prompt = build_html_pagination_prompt(normalized, rules=rules)
     model_pages = _run_html_pagination_model(prompt)
     if model_pages is not None:
-        if len(model_pages) > HTML_PAGINATION_MAX_PAGES:
-            raise RuntimeError("html pagination exceeded the 20-page contract")
-        return model_pages
-    return _paginate_markdown_content_with_rules(normalized, rules=rules)
+        return _collapse_units_to_page_limit(
+            model_pages,
+            max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
+            preserve_summary_page=_requires_summary_tail_preservation(rules),
+        )
+    return _paginate_markdown_content_with_rules(
+        normalized,
+        rules=rules,
+    )
 
 
 def _strip_legacy_preface(
@@ -706,6 +717,7 @@ def materialize_section_markdown(
     *,
     output_dir: Path,
     default_block_type: str,
+    include_cover: bool = False,
 ) -> Path:
     block_type = _resolve_section_block_type(section, default_block_type=default_block_type)
     md_name = _resolve_section_md_name(section)
@@ -726,9 +738,17 @@ def materialize_section_markdown(
         raise RuntimeError(
             f"page_count {section.page_count} does not match len(page_content) {len(pages)} for section {section.id}"
         )
-    if block_type == "html" and len(pages) > HTML_PAGINATION_MAX_PAGES:
+    if include_cover:
+        pages = _collapse_units_to_page_limit(
+            pages,
+            max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
+            preserve_summary_page=True,
+        )
+        pages.insert(0, f"## {strip_section_prefix(section.title)}")
+
+    if len(pages) > HTML_PAGINATION_MAX_PAGES:
         raise RuntimeError(
-            f"html pagination exceeded the 20-page contract for section {section.id}"
+            f"Final page list exceeded the 20-page contract for section {section.id}"
         )
 
     md_path = output_dir / md_name
@@ -751,6 +771,7 @@ def materialize_markdown_artifacts(
             section,
             output_dir=output_dir,
             default_block_type=manifest.default_block_type,
+            include_cover=manifest.course_scene in COURSE_SCENES_WITH_COVER,
         )
 
 
