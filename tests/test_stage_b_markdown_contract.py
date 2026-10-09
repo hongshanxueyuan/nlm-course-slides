@@ -169,6 +169,52 @@ class StageBMarkdownContractTest(unittest.TestCase):
                     ),
                 )
 
+    def test_stage_b_removes_cover_title_when_repeated_at_start_of_body(self) -> None:
+        cover_title = "从 AI 建议转向建议执行监督闭环"
+        body_pages = [
+            f"# {cover_title}\n\n本节介绍的是{cover_title}。",
+            f"## {cover_title}\n\n后续正文。",
+        ]
+        for block_type in ("imagesgallery", "html"):
+            with self.subTest(block_type=block_type), tempfile.TemporaryDirectory() as tmpdir:
+                manifest_path = Path(tmpdir) / "manifest.json"
+                content = (
+                    common.serialize_canonical_markdown(body_pages)
+                    if block_type == "imagesgallery"
+                    else "\n\n".join(body_pages)
+                )
+                manifest_path.write_text(
+                    json.dumps(
+                        {
+                            "course_title": "测试课程",
+                            "course_scene": common.COURSE_SCENE_STANDARD,
+                            "sections": [
+                                {
+                                    "id": "2.4",
+                                    "title": f"2.4 {cover_title}",
+                                    "block_type": block_type,
+                                    "content": content,
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                payload, _output_dir = self._run_stage_b(manifest_path)
+                section = payload["sections"][0]
+
+                self.assertEqual(
+                    [
+                        f"# {cover_title}",
+                        f"本节介绍的是{cover_title}。",
+                        f"## {cover_title}\n\n后续正文。",
+                    ],
+                    section["page_content"],
+                )
+                self.assertEqual(3, section["page_count"])
+
     def test_stage_b_merges_imagesgallery_pages_before_adding_cover(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
