@@ -38,6 +38,8 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 - 对 HTML xblock 为主的课程，只有在上面的 MCP 验证通过后，才把 `markdown` 渲染模式作为默认正式调用路径，让导出的 `text` 字段保留标题、强调、列表和段落结构；如果下游明确要消费原始标签，再切到 `html` 渲染模式；如果仍在验证前阶段，继续沿用旧路径或先停在验证环节。
 - 阶段 B 里如果 section 走 `html` 路线，分页前读取独立规则文件 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它与发给 NotebookLM 的场景 `.txt` prompt 属于不同处理步骤，分别维护。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
+- slide 生成提示词存放在 `prompts/`。按 manifest 的 `course_scene` 选择模板；没有该字段时，课程标题含“出海、海外、境外、国际化”则使用企业出海模板，其余使用企业流程与智能化模板。section 显式填写的 `focus` 仍优先使用。
+- 所有模板必须保留相同的硬约束：按来源分页标识 1:1 生成，禁止合并、拆分、增删页面；第一页为只含主标题的封面；幻灯片可见文字只用中文（电话号码可用阿拉伯数字）；字体等排版指令不得进入可见文字。不得以 10–16 页等页数范围覆盖这些约束。
 - 如果需要本地下载后处理，默认使用 skill 自带的 `assets/logo.png`；如果用户需要换图标，在阶段 F 传 `--postprocess-image-path <absolute-path>`。
 
 ## Default Workflow
@@ -183,6 +185,7 @@ python3 scripts/create_slides_from_sources.py \
 
 - `slides create` 必须串行调用。
 - 每次 create 之间固定延迟 `10` 秒。
+- 创建前核对 manifest 解析出的 `course_scene` 与将要使用的提示词模板；出海课程不得落入流程智能化模板。
 - 允许 notebook 内同时存在多个远端生成中的 slide。
 - 本阶段固定沿用 CLI 脚本链执行，不重新选择工具方式。
 - 如果某个 create 失败，先记录，不要在脚本内暂停。
