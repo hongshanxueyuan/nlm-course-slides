@@ -53,6 +53,7 @@ Supported section fields:
 - `title` or `name`: section title
 - `content`, `text`, `body`, or `markdown`: section body sent to NotebookLM
 - `focus` or `prompt`: slide generation focus
+- `course_scene`: selects the course-wide slide prompt. Supported values are `企业流程与智能化场景` and `企业出海场景`. If omitted, the skill infers the scene from the course title; section-level `focus` takes precedence.
 - `resource_title` or `source_title`: NotebookLM source title
 - `output_name` or `filename`: output PPTX filename
 - `sections` or `children`: nested subsections

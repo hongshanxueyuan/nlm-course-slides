@@ -80,6 +80,18 @@ def _load_focus_prompt_template(path: Path) -> str:
     template = path.read_text(encoding="utf-8").strip()
     if not template:
         raise RuntimeError(f"Focus prompt template is empty: {path}")
+    required_markers = (
+        "1:1 逐页强对应法则",
+        "严禁合并与拆分",
+        "严禁自行增删页面",
+        "演示文稿只使用中文",
+        "任何幻灯片可见文字中都不得出现",
+    )
+    missing = [marker for marker in required_markers if marker not in template]
+    if missing:
+        raise RuntimeError(
+            f"Focus prompt template is missing shared slide constraints {missing}: {path}"
+        )
     return template
 
 
@@ -87,6 +99,12 @@ FOCUS_PROMPT_TEMPLATES = {
     scene: _load_focus_prompt_template(path)
     for scene, path in FOCUS_PROMPT_TEMPLATE_FILES.items()
 }
+
+GLOBAL_SLIDE_TEXT_RULES = (
+    "【所有场景共用的文字与排版要求】：字体、字号、颜色、粗体等均是视觉排版指令，不是页面内容。"
+    "所有幻灯片的可见文字不得包含字体名称或排版说明；标题只保留实际标题文字。"
+    "尤其“黑体”仅表示字体样式，任何场景下都不得出现在幻灯片可见文字中。"
+)
 
 FIRA_SKIP_CHAPTER_NAMES = {"训战启程", "训战总结、训战输出", "满意度调查"}
 PROMPT_TITLE_RE = re.compile(r"文稿题目：([^\n\r]+)")
@@ -214,20 +232,35 @@ def strip_section_prefix(title: str) -> str:
     return cleaned or title.strip()
 
 
-def normalize_course_scene(course_scene: str | None) -> str:
-    normalized = str(course_scene or COURSE_SCENE_STANDARD).strip()
-    if normalized in COURSE_SCENE_ALIASES:
-        return COURSE_SCENE_ALIASES[normalized]
-    raise RuntimeError(
-        f"Unsupported course_scene '{normalized}'. Expected one of: "
-        f"{', '.join(FOCUS_PROMPT_TEMPLATES)}"
+def normalize_course_scene(
+    course_scene: str | None,
+    course_title: str | None = None,
+) -> str:
+    normalized = str(course_scene or "").strip()
+    if normalized:
+        if normalized in COURSE_SCENE_ALIASES:
+            return COURSE_SCENE_ALIASES[normalized]
+        raise RuntimeError(
+            f"Unsupported course_scene '{normalized}'. Expected one of: "
+            f"{', '.join(FOCUS_PROMPT_TEMPLATES)}"
+        )
+    title = str(course_title or "")
+    if re.search(r"出海|海外|境外|国际化", title):
+        return COURSE_SCENE_OVERSEAS
+    return COURSE_SCENE_STANDARD
+
+
+def build_focus_prompt(
+    title: str,
+    *,
+    course_scene: str | None = None,
+    course_title: str | None = None,
+) -> str:
+    scene = normalize_course_scene(course_scene, course_title)
+    prompt = FOCUS_PROMPT_TEMPLATES[scene].format(
+        section_title=strip_section_prefix(title)
     )
-
-
-def build_focus_prompt(title: str, *, course_scene: str | None = None) -> str:
-    resolved_course_scene = normalize_course_scene(course_scene)
-    template = FOCUS_PROMPT_TEMPLATES[resolved_course_scene]
-    return template.format(section_title=strip_section_prefix(title))
+    return f"{prompt}\n\n{GLOBAL_SLIDE_TEXT_RULES}"
 
 
 def resolve_section_focus(
@@ -1641,8 +1674,15 @@ def _normalize_manifest(
     if not isinstance(data, dict):
         raise RuntimeError(f"Manifest root must be an object: {source}")
 
+    course_title_hint = str(
+        data.get("name")
+        or data.get("course_title")
+        or data.get("title")
+        or source.stem
+    ).strip()
     resolved_course_scene = normalize_course_scene(
-        course_scene or data.get("course_scene") or data.get("courseScene")
+        course_scene or data.get("course_scene") or data.get("courseScene"),
+        course_title_hint,
     )
 
     if isinstance(data.get("chapters"), list):
@@ -1652,7 +1692,9 @@ def _normalize_manifest(
             course_scene=resolved_course_scene,
         )
 
-    course_title = str(data.get("course_title") or data.get("title") or source.stem).strip()
+    course_title = str(
+        data.get("course_title") or data.get("title") or data.get("name") or source.stem
+    ).strip()
     raw_sections = data.get("sections") or data.get("chapters")
     if not isinstance(raw_sections, list) or not raw_sections:
         raise RuntimeError(f"Manifest must contain a non-empty sections list: {source}")
@@ -1901,7 +1943,7 @@ def _load_markdown_manifest(
         course_title=course_title,
         sections=sections,
         source_path=str(source.resolve()),
-        course_scene=normalize_course_scene(course_scene),
+        course_scene=normalize_course_scene(course_scene, course_title),
         source_kind="markdown",
         default_block_type="html",
     )

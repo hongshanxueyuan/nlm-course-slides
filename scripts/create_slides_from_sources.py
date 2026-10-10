@@ -118,14 +118,16 @@ def main() -> int:
             )
             continue
 
+        focus_prompt = ""
         try:
+            focus_prompt = resolve_section_focus(
+                section,
+                course_scene=manifest.course_scene,
+            )
             artifact_id = create_slide_deck(
                 notebook_id,
                 source_id=source_id,
-                focus=resolve_section_focus(
-                    section,
-                    course_scene=manifest.course_scene,
-                ),
+                focus=focus_prompt,
                 language=args.language,
                 deck_format=args.deck_format,
                 length=args.length,
@@ -140,6 +142,7 @@ def main() -> int:
                     "source_id": source_id,
                     "artifact_id": artifact_id,
                     "status": "create_requested",
+                    "focus_prompt": focus_prompt,
                     "error": None,
                 }
             )
@@ -152,6 +155,7 @@ def main() -> int:
                     "source_id": source_id,
                     "artifact_id": None,
                     "status": "failed_create",
+                    "focus_prompt": focus_prompt,
                     "error": str(exc),
                 }
             )
