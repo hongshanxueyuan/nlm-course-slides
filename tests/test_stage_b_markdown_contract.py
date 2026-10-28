@@ -20,6 +20,8 @@ import upload_course_sections  # noqa: E402
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+if not (WORKSPACE_ROOT / "test" / "_files_dir").is_dir():
+    WORKSPACE_ROOT = WORKSPACE_ROOT.parent
 PURE_HTML_MANIFEST = (
     WORKSPACE_ROOT
     / "test"
@@ -97,7 +99,9 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual(section["page_count"], len(section["page_content"]))
         self.assertLessEqual(section["page_count"], 20)
         self.assertTrue(section["page_content"][0].startswith("# 博弈规则——【法国】合规宽严度与生存策略"))
-        self.assertTrue(section["page_content"][-1].startswith("## 本节要点"))
+        self.assertFalse(
+            any(page.splitlines()[0].lstrip("# ") == "本节要点" for page in section["page_content"])
+        )
         for page in section["page_content"]:
             self.assertIsNone(common.PAGE_MARKER_RE.search(page))
             self.assertNotIn("<style", page)
@@ -110,6 +114,171 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertNotIn("<style", md_body)
         self.assertNotIn("<p>", md_body)
         self.assertNotIn("<h2>", md_body)
+
+    def test_stage_b_omits_trailing_html_key_points_page_from_all_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "course_scene": common.COURSE_SCENE_STANDARD,
+                        "sections": [
+                            {
+                                "id": "1.1",
+                                "title": "1.1 示例章节",
+                                "block_type": "html",
+                                "content": "## 正文\n\n原始正文。\n\n## 本节要点\n\n源摘要仍保留。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            original_manifest = manifest_path.read_bytes()
+
+            def fake_model(prompt: str) -> list[str]:
+                self.assertIn("源摘要仍保留", prompt)
+                return [
+                    "## 正文\n\n原始正文。",
+                    "## 本节要点\n\n源摘要仍保留。",
+                ]
+
+            with patch("common._run_html_pagination_model", side_effect=fake_model):
+                payload, output_dir = self._run_stage_b(manifest_path)
+
+            section = payload["sections"][0]
+            md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
+
+            self.assertEqual(
+                ["# 示例章节", "## 正文\n\n原始正文。"],
+                section["page_content"],
+            )
+            self.assertEqual(2, section["page_count"])
+            self.assertEqual(section["page_count"], len(section["page_content"]))
+            self._assert_marker_alignment(md_body, section["page_count"])
+            self.assertEqual(
+                section["page_content"],
+                common.parse_canonical_markdown_pages(
+                    md_body,
+                    section_title=section["section_title"],
+                    output_stem=Path(section["md_name"]).stem,
+                ),
+            )
+            self.assertNotIn("本节要点", md_body)
+            self.assertNotIn("源摘要仍保留", md_body)
+            self.assertEqual(original_manifest, manifest_path.read_bytes())
+            self.assertIn("源摘要仍保留", manifest_path.read_text(encoding="utf-8"))
+
+    def test_stage_b_preserves_other_html_tails_and_inline_key_points_mentions(self) -> None:
+        cases = [
+            (["## 正文\n\n正文。", "## 总结\n\n总结内容。"], "## 总结"),
+            (["## 正文\n\n正文。", "## 复盘\n\n复盘内容。"], "## 复盘"),
+            (["## 正文\n\n正文提到本节要点，但这是普通正文。"], "正文提到本节要点"),
+        ]
+        for pages, expected_tail in cases:
+            with self.subTest(expected_tail=expected_tail), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                manifest_path = root / "manifest.json"
+                manifest_path.write_text(
+                    json.dumps(
+                        {
+                            "course_title": "测试课程",
+                            "course_scene": common.COURSE_SCENE_STANDARD,
+                            "sections": [
+                                {
+                                    "id": "1.2",
+                                    "title": "1.2 边界测试",
+                                    "block_type": "html",
+                                    "content": "原始课程正文。",
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                with patch("common._run_html_pagination_model", return_value=pages):
+                    payload, _output_dir = self._run_stage_b(manifest_path)
+
+                section = payload["sections"][0]
+                self.assertIn(expected_tail, section["page_content"][-1])
+                self.assertEqual(section["page_count"], len(section["page_content"]))
+
+    def test_stage_b_omits_explicit_html_summary_page_after_validating_source_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "course_scene": common.COURSE_SCENE_STANDARD,
+                        "sections": [
+                            {
+                                "id": "1.3",
+                                "title": "1.3 显式分页",
+                                "block_type": "html",
+                                "page_content": [
+                                    "## 正文\n\n内容。",
+                                    "## 本节要点\n\n摘要。",
+                                ],
+                                "page_count": 2,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            payload, output_dir = self._run_stage_b(manifest_path)
+            section = payload["sections"][0]
+            md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
+
+            self.assertEqual(["# 显式分页", "## 正文\n\n内容。"], section["page_content"])
+            self.assertEqual(2, section["page_count"])
+            self.assertNotIn("摘要。", md_body)
+            self._assert_marker_alignment(md_body, 2)
+
+    def test_stage_b_omits_only_html_summary_page_but_keeps_cover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "course_title": "测试课程",
+                        "course_scene": common.COURSE_SCENE_STANDARD,
+                        "sections": [
+                            {
+                                "id": "1.4",
+                                "title": "1.4 仅有摘要",
+                                "block_type": "html",
+                                "content": "## 本节要点\n\n摘要。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "common._run_html_pagination_model",
+                return_value=["## 本节要点\n\n摘要。"],
+            ):
+                payload, output_dir = self._run_stage_b(manifest_path)
+
+            section = payload["sections"][0]
+            md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
+
+            self.assertEqual(["# 仅有摘要"], section["page_content"])
+            self.assertEqual(1, section["page_count"])
+            self.assertNotIn("本节要点", md_body)
+            self._assert_marker_alignment(md_body, 1)
 
     def test_stage_b_prepends_semantic_title_cover_for_both_scenes(self) -> None:
         for scene in (common.COURSE_SCENE_STANDARD, common.COURSE_SCENE_OVERSEAS):
@@ -267,7 +436,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
         self._assert_marker_alignment(md_body, 20)
 
-    def test_stage_b_reserves_cover_and_merges_adjacent_html_pages_to_fit(self) -> None:
+    def test_stage_b_omits_html_summary_before_applying_cover_page_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest_path = root / "manifest.json"
@@ -325,9 +494,11 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual("# 出海章节", section["page_content"][0])
         self.assertEqual(20, section["page_count"])
         self.assertEqual(20, len(section["page_content"]))
-        self.assertIn("第1页内容。", section["page_content"][1])
-        self.assertIn("第2页内容。", section["page_content"][1])
-        self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
+        self.assertEqual("## 正文1\n\n第1页内容。", section["page_content"][1])
+        self.assertEqual("## 正文19\n\n第19页内容。", section["page_content"][-1])
+        self.assertFalse(
+            any(page.splitlines()[0].lstrip("# ") == "本节要点" for page in section["page_content"])
+        )
         self._assert_marker_alignment(md_body, 20)
 
     def test_stage_b_rejects_mismatched_explicit_md_name(self) -> None:

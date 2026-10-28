@@ -326,6 +326,12 @@ def _is_summary_block(block: str) -> bool:
     return bool(title and title in SUMMARY_HEADING_TEXTS)
 
 
+def _omit_trailing_key_points_page(pages: list[str]) -> list[str]:
+    if pages and _heading_text(pages[-1]) == "本节要点":
+        return pages[:-1]
+    return pages
+
+
 def _split_markdown_blocks(text: str) -> list[str]:
     return [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
 
@@ -480,6 +486,7 @@ def _paginate_markdown_content_with_rules(
     text: str,
     *,
     rules: str,
+    omit_trailing_key_points_page: bool = False,
 ) -> list[str]:
     normalized = _clean_page_body(text)
     if not normalized:
@@ -490,6 +497,8 @@ def _paginate_markdown_content_with_rules(
     expanded_units: list[str] = []
     for unit in units:
         expanded_units.extend(_split_long_unit(unit))
+    if omit_trailing_key_points_page:
+        expanded_units = _omit_trailing_key_points_page(expanded_units)
 
     pages = _collapse_units_to_page_limit(
         expanded_units,
@@ -498,13 +507,19 @@ def _paginate_markdown_content_with_rules(
     )
     normalized_pages = [_clean_page_body(page) for page in pages if _clean_page_body(page)]
     if not normalized_pages:
+        if omit_trailing_key_points_page and not expanded_units:
+            return []
         raise RuntimeError("html pagination did not produce any pages")
     if len(normalized_pages) > HTML_PAGINATION_COVER_BODY_MAX_PAGES:
         raise RuntimeError("html pagination exceeded the 19-page body contract")
     return normalized_pages
 
 
-def paginate_markdown_content(text: str) -> list[str]:
+def paginate_markdown_content(
+    text: str,
+    *,
+    omit_trailing_key_points_page: bool = False,
+) -> list[str]:
     rules = load_html_pagination_rules()
     normalized = _clean_page_body(text)
     if not normalized:
@@ -513,6 +528,8 @@ def paginate_markdown_content(text: str) -> list[str]:
     prompt = build_html_pagination_prompt(normalized, rules=rules)
     model_pages = _run_html_pagination_model(prompt)
     if model_pages is not None:
+        if omit_trailing_key_points_page:
+            model_pages = _omit_trailing_key_points_page(model_pages)
         return _collapse_units_to_page_limit(
             model_pages,
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
@@ -521,6 +538,7 @@ def paginate_markdown_content(text: str) -> list[str]:
     return _paginate_markdown_content_with_rules(
         normalized,
         rules=rules,
+        omit_trailing_key_points_page=omit_trailing_key_points_page,
     )
 
 
@@ -744,12 +762,17 @@ def materialize_section_markdown(
             allow_legacy_preface=True,
         )
     else:
-        pages = paginate_markdown_content(_select_html_source_text(section))
+        pages = paginate_markdown_content(
+            _select_html_source_text(section),
+            omit_trailing_key_points_page=True,
+        )
 
     if section.page_count is not None and section.page_count != len(pages):
         raise RuntimeError(
             f"page_count {section.page_count} does not match len(page_content) {len(pages)} for section {section.id}"
         )
+    if section.page_content is not None and block_type == "html":
+        pages = _omit_trailing_key_points_page(pages)
     if include_cover:
         cover_title = strip_section_prefix(section.title)
         pages = _remove_duplicate_cover_heading(pages, title=cover_title)
