@@ -84,8 +84,9 @@ python3 scripts/prepare_course_json.py \
 
 - 对 `imagesgallery` 路线，阶段 B 直接规范化已有分页文本。
 - 对 `html` 路线，阶段 B 会读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)，把 Markdown 教学正文切成 canonical page 内容，再写入 `section-list.json` 和对应 `.md` 文件。该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
+- 对 `block_type=html` 的小节，阶段 B 会从最终页面列表中省略末尾独立标题为“本节要点”的页面；不会把摘要内容并入前一页，也不会改写源课程。该规则不影响 `imagesgallery`、末页标题为“总结”或“复盘”的页面，以及正文中提及“本节要点”的页面。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
-- 正文分页结果最多 19 页；封面由程序随后插入，最终页面列表最多 20 页。超限时只合并相邻正文页，封面不参与合并。
+- HTML 小节移除上述摘要页后，正文分页结果最多 19 页；封面由程序随后插入，最终页面列表最多 20 页。超限时只合并相邻正文页，封面不参与合并。
 - 最终页面列表同时生成 canonical Markdown 和 `section-list.json`；`page_count` 必须等于 `page_content` 条数及 Markdown 页标记数。下游 `ppt-to-imagesgallery` 继续按 `page_count`、`page_content` 和真实 PPT 页数匹配处理。
 
 命令：

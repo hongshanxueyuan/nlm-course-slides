@@ -64,6 +64,8 @@ class CourseSceneManifestTest(unittest.TestCase):
         pagination_rules = common.load_html_pagination_rules()
         self.assertIn("正文分页结果**不得超过 19 页**", pagination_rules)
         self.assertIn("不生成开头页、结尾页、文件名页或额外封面页，避免冗余内容。", pagination_rules)
+        self.assertIn("最终 canonical 页面清单会省略这张末页", pagination_rules)
+        self.assertIn("分页模型仍须先单独输出该页", pagination_rules)
         for scene in (common.COURSE_SCENE_STANDARD, common.COURSE_SCENE_OVERSEAS):
             with self.subTest(scene=scene):
                 prompt = common.FOCUS_PROMPT_TEMPLATES[scene]
