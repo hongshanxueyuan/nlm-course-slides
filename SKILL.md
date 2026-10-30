@@ -32,10 +32,10 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 
 ## Prerequisites
 
-- 开始前确认 `nlm` 已安装并已登录；如有需要，运行 `nlm login`。
-- 输入优先使用本地 JSON；如果用户给的是 `tenant_id + course_id`，先完成约定样例的 MCP 验证；验证通过后，再调用 `fira-insights` 的 `get_course_content_json`，并按下游用途显式传 `html_block_render_mode`：默认用 `markdown`，只有用户明确需要原始 HTML 标签时才用 `html`，再把返回的 `signed_url` 下载到本地课程目录。
+- 开始前确认 `nlm` 已安装并已登录；如有需要，运行 `nlm login`。首次使用前安装 Python 依赖：`python3 -m pip install -r requirements.txt`。
+- 阶段 A 必须调用 `insights_mcp_server` 的 `get_runtime_course_content` 获取课程内容；调用时使用明确且有效的 `tenant` 和 `course_id`。将工具返回的完整 JSON 直接交给本地落盘脚本；工具不可用或调用失败时停止，不改用其他 MCP、签名 URL 或本地文件来源。
 - 课程结构解析继续沿用现有 manifest/FIRA 解析逻辑与 skip 规则；只有叶子 section 会进入后续阶段。
-- 对 HTML xblock 为主的课程，只有在上面的 MCP 验证通过后，才把 `markdown` 渲染模式作为默认正式调用路径，让导出的 `text` 字段保留标题、强调、列表和段落结构；如果下游明确要消费原始标签，再切到 `html` 渲染模式；如果仍在验证前阶段，继续沿用旧路径或先停在验证环节。
+- 阶段 B 会对 HTML 组件的 `text` 做 HTML 清理并转换为 Markdown，再执行现有分页流程。
 - 阶段 B 里如果 section 走 `html` 路线，分页前读取独立规则文件 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它与发给 NotebookLM 的场景 `.txt` prompt 属于不同处理步骤，分别维护。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
 - 如果需要本地下载后处理，默认使用 skill 自带的 `assets/logo.png`；如果用户需要换图标，在阶段 F 传 `--postprocess-image-path <absolute-path>`。
@@ -48,8 +48,8 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 
 处理方式：
 
-- 用户已经提供本地 JSON：直接复用并复制到课程目录。
-- 用户提供 `tenant_id + course_id`：先确认 MCP 验证已通过，再按下游用途调用 `get_course_content_json`；默认传 `html_block_render_mode="markdown"`，只有明确需要原始 HTML 时才传 `html_block_render_mode="html"`，然后下载 `signed_url`。
+- 使用 `insights_mcp_server` 的 `get_runtime_course_content` 获取完整课程 JSON。`tenant` 与 `course_id` 必须明确且有效；不得猜测或改写参数。
+- 将工具返回的完整 JSON 原样通过 stdin 传给脚本落盘。调用失败时报告错误并停止，不使用签名 URL、本地文件或其他工具兜底。
 - 阶段产物：
   - `course-json-report.json`
   - 课程目录内的 JSON 文件
@@ -58,15 +58,7 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 
 ```bash
 python3 scripts/prepare_course_json.py \
-  --source-file /path/to/course.json \
-  --course-name "课程名称"
-```
-
-或：
-
-```bash
-python3 scripts/prepare_course_json.py \
-  --signed-url "<signed_url>" \
+  --json-stdin \
   --course-name "课程名称" \
   --filename "课程内容.json"
 ```
@@ -82,7 +74,7 @@ python3 scripts/prepare_course_json.py \
 
 补充说明：
 
-- 对 `imagesgallery` 路线，阶段 B 直接规范化已有分页文本。
+- 对 `imagesgallery` 路线，阶段 B 先移除组件 `text` 中的所有反斜杠，再规范化已有分页文本。
 - 对 `html` 路线，阶段 B 会读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)，把 Markdown 教学正文切成 canonical page 内容，再写入 `section-list.json` 和对应 `.md` 文件。该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
 - 对 `block_type=html` 的小节，阶段 B 会从最终页面列表中省略末尾独立标题为“本节要点”的页面；不会把摘要内容并入前一页，也不会改写源课程。该规则不影响 `imagesgallery`、末页标题为“总结”或“复盘”的页面，以及正文中提及“本节要点”的页面。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。

@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from markdownify import markdownify as html_to_markdown
+
 
 class _FcntlLike(Protocol):
     LOCK_EX: int
@@ -98,6 +100,17 @@ NLM_RATE_LIMIT_LOCK_PATH = Path(tempfile.gettempdir()) / "nlm-course-slides.rate
 NLM_STATUS_RATE_LIMIT_LOCK_PATH = Path(tempfile.gettempdir()) / "nlm-course-slides.status-rate-limit.lock"
 PAGE_MARKER_RE = re.compile(r"^\s*-\s*第\s*(\d+)\s*页\s*$", re.MULTILINE)
 HTML_TAG_RE = re.compile(r"<[A-Za-z/!][^>]*>")
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+HTML_IMAGE_TAG_RE = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
+HTML_STYLE_BLOCK_RE = re.compile(
+    r"<style\b[^>]*>.*?</style>", flags=re.IGNORECASE | re.DOTALL
+)
+HTML_SCRIPT_BLOCK_RE = re.compile(
+    r"<script\b[^>]*>.*?</script>", flags=re.IGNORECASE | re.DOTALL
+)
+HTML_HEAD_BLOCK_RE = re.compile(
+    r"<head\b[^>]*>.*?</head>", flags=re.IGNORECASE | re.DOTALL
+)
 EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
 SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
@@ -275,6 +288,26 @@ def _clean_page_body(text: str) -> str:
     normalized = _strip_empty_heading_blocks(normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.strip()
+
+
+def _remove_image_links(text: str) -> str:
+    return MARKDOWN_IMAGE_RE.sub("", text or "").strip()
+
+
+def _sanitize_html(html: str) -> str:
+    sanitized = html or ""
+    sanitized = HTML_HEAD_BLOCK_RE.sub("", sanitized)
+    sanitized = HTML_STYLE_BLOCK_RE.sub("", sanitized)
+    sanitized = HTML_SCRIPT_BLOCK_RE.sub("", sanitized)
+    sanitized = HTML_IMAGE_TAG_RE.sub("", sanitized)
+    return sanitized.strip()
+
+
+def _render_html(raw_html: str) -> str:
+    html = _sanitize_html(raw_html)
+    return _remove_image_links(
+        html_to_markdown(html, heading_style="ATX")
+    ).strip()
 
 
 def _normalize_explicit_page_content(page_content: list[str]) -> list[str]:
@@ -720,18 +753,26 @@ def _select_imagesgallery_source_text(section: Section) -> str:
     if section.source_blocks:
         gallery_blocks = _select_fira_blocks(section.source_blocks, category="imagesgallery")
         if gallery_blocks:
-            return gallery_blocks[0].text.strip()
+            return _remove_backslashes(gallery_blocks[0].text)
     if section.content and PAGE_MARKER_RE.search(section.content):
-        return section.content.strip()
+        return _remove_backslashes(section.content)
     raise RuntimeError(
         f"Section {section.id} is on the imagesgallery route but has no usable imagesgallery text"
     )
 
 
+def _remove_backslashes(text: str) -> str:
+    return (text or "").replace("\\", "").strip()
+
+
 def _select_html_source_text(section: Section) -> str:
     if section.source_blocks:
         html_blocks = _select_fira_blocks(section.source_blocks, category="html")
-        html_texts = [_clean_page_body(block.text) for block in html_blocks if block.text.strip()]
+        html_texts = [
+            _clean_page_body(PAGE_MARKER_RE.sub("\n\n", _render_html(block.text)))
+            for block in html_blocks
+            if block.text.strip()
+        ]
         html_texts = [text for text in html_texts if text]
         if html_texts:
             return "\n\n".join(html_texts).strip()
