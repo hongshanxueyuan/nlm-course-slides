@@ -9,19 +9,27 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 import common  # noqa: E402
 import list_course_sections  # noqa: E402
 import upload_course_sections  # noqa: E402
+from fake_codex import run_stage_b_command  # noqa: E402
 
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-if not (WORKSPACE_ROOT / "test" / "_files_dir").is_dir():
-    WORKSPACE_ROOT = WORKSPACE_ROOT.parent
+WORKSPACE_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "test" / "_files_dir").is_dir()
+    ),
+    Path(__file__).resolve().parents[2],
+)
 PURE_HTML_MANIFEST = (
     WORKSPACE_ROOT
     / "test"
@@ -39,16 +47,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         output_dir = Path(tempdir.name)
         report_path = output_dir / "section-list.json"
-        argv = [
-            "list_course_sections.py",
-            str(manifest_path),
-            "--output-dir",
-            str(output_dir),
-            "--report-path",
-            str(report_path),
-        ]
-        with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
-            exit_code = list_course_sections.main()
+        exit_code = run_stage_b_command(manifest_path, output_dir, report_path)
         self.assertEqual(0, exit_code)
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         return payload, output_dir
@@ -64,6 +63,10 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 return section
         raise AssertionError(f"Could not find section '{section_title}' in payload")
 
+    @unittest.skipUnless(
+        MIXED_IMAGESGALLERY_MANIFEST.is_file(),
+        "external gallery fixture is unavailable",
+    )
     def test_stage_b_uses_imagesgallery_route_for_mixed_section(self) -> None:
         payload, snapshot_dir = self._run_stage_b(MIXED_IMAGESGALLERY_MANIFEST)
         section = self._find_section(
@@ -692,16 +695,7 @@ class StageCMarkdownUploadTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        argv = [
-            "list_course_sections.py",
-            str(manifest_path),
-            "--output-dir",
-            str(output_dir),
-            "--report-path",
-            str(report_path),
-        ]
-        with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
-            exit_code = list_course_sections.main()
+        exit_code = run_stage_b_command(manifest_path, output_dir, report_path)
         self.assertEqual(0, exit_code)
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         section = payload["sections"][0]
@@ -717,16 +711,7 @@ class StageCMarkdownUploadTest(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         output_dir = Path(tempdir.name)
         report_path = output_dir / "section-list.json"
-        argv = [
-            "list_course_sections.py",
-            str(manifest_path),
-            "--output-dir",
-            str(output_dir),
-            "--report-path",
-            str(report_path),
-        ]
-        with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
-            exit_code = list_course_sections.main()
+        exit_code = run_stage_b_command(manifest_path, output_dir, report_path)
         self.assertEqual(0, exit_code)
 
         payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -841,6 +826,10 @@ class StageCMarkdownUploadTest(unittest.TestCase):
             "html",
         )
 
+    @unittest.skipUnless(
+        MIXED_IMAGESGALLERY_MANIFEST.is_file(),
+        "external gallery fixture is unavailable",
+    )
     def test_stage_c_uploads_canonical_markdown_for_imagesgallery_fixture(self) -> None:
         self._assert_fixture_stage_c_uploads_canonical_markdown(
             MIXED_IMAGESGALLERY_MANIFEST,
