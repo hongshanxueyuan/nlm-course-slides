@@ -76,6 +76,7 @@ python3 scripts/prepare_course_json.py --json-stdin
 - 每个子 agent 只处理一个 `section_index`，运行分页 worker 并返回结果路径；分页内容留在结果文件中。
 - 对 `block_type=html` 的小节，阶段 B 会从最终页面列表中省略末尾独立标题为“本节要点”的页面；不会把摘要内容并入前一页，也不会改写源课程。该规则不影响 `imagesgallery`、末页标题为“总结”或“复盘”的页面，以及正文中提及“本节要点”的页面。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
+- 加入封面后，Stage B 会检查其后的每一页：页面去掉首尾空白后若只有一行 Markdown 标题（`#` 到 `######`），且标题文本与封面标题完全相同，就删除这张重复标题页；标题级别不影响匹配。保留含有正文或其他内容的同名标题页。随后从去重后的同一页面列表生成 canonical Markdown 和 `section-list.json`，并重算 `page_count` 与页标记。
 - HTML 小节移除上述摘要页后，正文分页结果最多 19 页；封面由程序随后插入，最终页面列表最多 20 页。超限时只合并相邻正文页，封面不参与合并。
 - 最终页面列表同时生成 canonical Markdown 和 `section-list.json`；`page_count` 必须等于 `page_content` 条数及 Markdown 页标记数。下游 `ppt-to-imagesgallery` 继续按 `page_count`、`page_content` 和真实 PPT 页数匹配处理。
 
