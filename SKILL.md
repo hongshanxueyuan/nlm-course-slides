@@ -54,13 +54,10 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
   - `course-json-report.json`
   - 课程目录内的 JSON 文件
 
-命令：
+命令（在期望的课程输出父目录中运行；脚本从 JSON 读取课程名并使用 ASCII 文件名）：
 
 ```bash
-python3 scripts/prepare_course_json.py \
-  --json-stdin \
-  --course-name "课程名称" \
-  --filename "课程内容.json"
+python3 scripts/prepare_course_json.py --json-stdin
 ```
 
 执行规则：
@@ -75,7 +72,8 @@ python3 scripts/prepare_course_json.py \
 补充说明：
 
 - 对 `imagesgallery` 路线，阶段 B 先移除组件 `text` 中的所有反斜杠，再规范化已有分页文本。
-- 对 `html` 路线，阶段 B 会读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)，把 Markdown 教学正文切成 canonical page 内容，再写入 `section-list.json` 和对应 `.md` 文件。该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
+- 对需要模型分页的 `html` section，每节固定使用 `gpt-6.1-terra`，先由独立 Codex 子 agent 处理，再汇总写入 `section-list.json` 和对应 `.md` 文件。分页前读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
+- 每个子 agent 只处理一个 `section_index`，运行分页 worker 并返回结果路径；分页内容留在结果文件中。
 - 对 `block_type=html` 的小节，阶段 B 会从最终页面列表中省略末尾独立标题为“本节要点”的页面；不会把摘要内容并入前一页，也不会改写源课程。该规则不影响 `imagesgallery`、末页标题为“总结”或“复盘”的页面，以及正文中提及“本节要点”的页面。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
 - HTML 小节移除上述摘要页后，正文分页结果最多 19 页；封面由程序随后插入，最终页面列表最多 20 页。超限时只合并相邻正文页，封面不参与合并。
@@ -84,13 +82,36 @@ python3 scripts/prepare_course_json.py \
 命令：
 
 ```bash
-python3 scripts/list_course_sections.py \
-  /path/to/course.json
+python3 scripts/html_pagination_worker.py /path/to/course.json --list-jobs
 ```
+
+并行分页步骤：
+
+1. 读取上一步 JSON 输出中的 `jobs`。`cached` 项已完成；每个 `pending` 项对应一个 HTML section。`output_dir` 是 worker 结果目录。
+2. 对每个 `pending` 项通过 Codex 的 `collaboration.spawn_agent` 创建一个子 agent，传入该项的 `section_index`、课程 JSON 路径和 `output_dir`。子 agent 只运行以下命令并返回状态与结果路径；分页正文留在结果文件中。
+
+   ```bash
+   python3 scripts/html_pagination_worker.py /path/to/course.json \
+     --section-index 4 \
+     --output-dir /path/to/.html-pagination-workers
+   ```
+
+3. 同时最多保留 2 个正在处理的子 agent。每个子 agent 是叶子 worker，只处理一个 section。每有一个完成，再启动下一个待处理 section；所有 section 完成后再做汇总。
+4. 所有 worker 均成功或已有有效缓存后，运行聚合命令：
+
+   ```bash
+   python3 scripts/list_course_sections.py /path/to/course.json \
+     --pagination-results-dir /path/to/.html-pagination-workers
+   ```
+
+   `html_pagination_worker.py --list-jobs` 输出的 `output_dir` 是上述目录。worker 结果按课程 JSON 摘要、分页模型和分页请求校验；输入变化后的旧结果会被拒绝。失败时保留其他成功结果，只重跑失败或缺失的 section。任一 worker 失败时不要运行聚合命令，也不要进入阶段 C。保持与阶段 A 相同的工作目录，让默认课程输出目录继续使用阶段 A 创建的课程目录。
+
+只有当计划中的 `total_jobs` 为 `0` 时，才跳过 worker 并直接运行 `list_course_sections.py`。如果所有任务都是 `cached`，仍用 `--pagination-results-dir` 聚合这些结果，不要重新发起模型请求。
 
 阶段产物：
 
 - `section-list.json`
+- 每个 section 对应的 `.md` 文件
 
 向用户汇报时至少展示：
 

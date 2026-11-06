@@ -6,7 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
@@ -53,20 +53,23 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         *,
         auth_mode: str = "apikey",
         wire_api: str = "responses",
+        env_key: str | None = "AZURE_OPENAI_API_KEY",
     ) -> None:
         codex_home.mkdir(parents=True)
         codex_home.joinpath("auth.json").write_text(
             json.dumps({"auth_mode": auth_mode, "OPENAI_API_KEY": "temporary-test-key"}),
             encoding="utf-8",
         )
-        codex_home.joinpath("config.toml").write_text(
+        config = (
             'model = "gpt-6-luna"\n'
             'model_provider = "azure"\n'
             "[model_providers.azure]\n"
             'base_url = "https://provider.example.test/v1"\n'
-            f'wire_api = "{wire_api}"\n',
-            encoding="utf-8",
         )
+        if env_key:
+            config += f'env_key = "{env_key}"\n'
+        config += f'wire_api = "{wire_api}"\n'
+        codex_home.joinpath("config.toml").write_text(config, encoding="utf-8")
 
     def _run_stage_b(
         self,
@@ -88,7 +91,10 @@ class HtmlPaginationCodexTest(unittest.TestCase):
             "--report-path",
             str(report_path),
         ]
-        env = {"CODEX_HOME": str(codex_home) if codex_home else ""}
+        env = {
+            "CODEX_HOME": str(codex_home) if codex_home else "",
+            "AZURE_OPENAI_API_KEY": "temporary-azure-key",
+        }
         env.update(extra_env or {})
         stdout = io.StringIO()
         home_patch = (
@@ -115,6 +121,8 @@ class HtmlPaginationCodexTest(unittest.TestCase):
                     "method": request.method,
                     "url": str(request.url),
                     "authorization": request.headers.get("authorization"),
+                    "api_key_header": request.headers.get("api-key"),
+                    "timeout": request.extensions.get("timeout"),
                     "body": json.loads(request.content.decode("utf-8")),
                 }
             )
@@ -130,18 +138,26 @@ class HtmlPaginationCodexTest(unittest.TestCase):
                 request=request,
             )
 
-        return lambda: SdkDefaultHttpxClient(transport=httpx.MockTransport(send))
+        return lambda **kwargs: SdkDefaultHttpxClient(
+            transport=httpx.MockTransport(send),
+            **kwargs,
+        )
 
     @staticmethod
-    def _html_section(content: str = "## Teaching\n\nRendered course text.") -> dict:
+    def _html_section(
+        content: str = "## Teaching\n\nRendered course text.",
+        *,
+        section_id: str = "1.1",
+        title: str = "1.1 SDK boundary",
+    ) -> dict:
         return {
-            "id": "1.1",
-            "title": "1.1 SDK boundary",
+            "id": section_id,
+            "title": title,
             "block_type": "html",
             "content": content,
         }
 
-    def test_stage_b_uses_codex_provider_and_pins_gpt_54(self) -> None:
+    def test_stage_b_uses_codex_provider_and_pins_gpt_6_1_terra(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             codex_home = root / "codex-home"
@@ -168,8 +184,10 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         self.assertEqual(1, len(requests))
         self.assertEqual("POST", requests[0]["method"])
         self.assertEqual("https://provider.example.test/v1/responses", requests[0]["url"])
-        self.assertEqual("Bearer temporary-test-key", requests[0]["authorization"])
-        self.assertEqual("gpt-5.4", requests[0]["body"]["model"])
+        self.assertEqual("Bearer temporary-azure-key", requests[0]["authorization"])
+        self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
+        self.assertLessEqual(requests[0]["timeout"]["read"], 120)
+        self.assertEqual("gpt-6.1-terra", requests[0]["body"]["model"])
         self.assertIn("Rendered course text.", requests[0]["body"]["input"])
         self.assertEqual(
             ["# SDK boundary", "## Generated body\n\nSDK split output."],
@@ -179,6 +197,152 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         self.assertIn("- 第 1 页", markdown)
         self.assertIn("- 第 2 页", markdown)
         self.assertNotIn("temporary-test-key", stdout + markdown + report_json)
+        self.assertNotIn("temporary-azure-key", stdout + markdown + report_json)
+
+    def test_stage_b_uses_active_azure_provider_key_and_auth_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            codex_home = root / "codex-home"
+            self._write_codex_home(
+                codex_home,
+                env_key="AZURE_OPENAI_API_KEY",
+            )
+            manifest_path = self._write_manifest(root, [self._html_section()])
+            requests: list[dict] = []
+            transport_factory = self._http_client_for_response(
+                json.dumps({"pages": ["## Generated body\\n\\nSDK split output."]}),
+                requests,
+            )
+
+            self._run_stage_b(
+                root,
+                manifest_path,
+                http_client_factory=transport_factory,
+                codex_home=codex_home,
+                extra_env={"AZURE_OPENAI_API_KEY": "temporary-azure-key"},
+            )
+
+        self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
+        self.assertEqual("Bearer temporary-azure-key", requests[0]["authorization"])
+        self.assertLessEqual(requests[0]["timeout"]["read"], 120)
+
+    def test_stage_b_reports_progress_and_reuses_successful_pages_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            codex_home = root / "codex-home"
+            self._write_codex_home(codex_home)
+            manifest_path = self._write_manifest(
+                root,
+                [
+                    self._html_section(
+                        "## First body\n\nFIRST PAGE",
+                        section_id="1.1",
+                        title="1.1 First section",
+                    ),
+                    self._html_section(
+                        "## Second body\n\nSECOND PAGE",
+                        section_id="1.2",
+                        title="1.2 Second section",
+                    ),
+                ],
+            )
+            first_run_requests: list[str] = []
+
+            def fail_second_section(request: httpx.Request) -> httpx.Response:
+                request_payload = json.loads(request.content.decode("utf-8"))
+                prompt = request_payload["input"]
+                first_run_requests.append(prompt)
+                if "SECOND PAGE" in prompt:
+                    return httpx.Response(
+                        500,
+                        json={"error": {"message": "temporary provider failure"}},
+                        request=request,
+                    )
+                return httpx.Response(
+                    200,
+                    json=responses_api_payload(
+                        json.dumps({"pages": ["## First body\\n\\nFIRST PAGE"]})
+                    ),
+                    request=request,
+                )
+
+            first_transport = lambda **kwargs: SdkDefaultHttpxClient(
+                transport=httpx.MockTransport(fail_second_section),
+                **kwargs,
+            )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), self.assertRaisesRegex(RuntimeError, "request failed"):
+                self._run_stage_b(
+                    root,
+                    manifest_path,
+                    http_client_factory=first_transport,
+                    codex_home=codex_home,
+                )
+
+            self.assertEqual(2, len(first_run_requests))
+            output_dir = root / "output"
+            self.assertFalse((output_dir / "1.1 First section.md").exists())
+            self.assertFalse((output_dir / "section-list.json").exists())
+            failure_path = output_dir / "section-list-failure.json"
+            self.assertEqual("failed", json.loads(failure_path.read_text(encoding="utf-8"))["status"])
+            self.assertIn("1/2", stderr.getvalue())
+            self.assertIn("2/2", stderr.getvalue())
+
+            retry_requests: list[str] = []
+
+            def succeed_all_sections(request: httpx.Request) -> httpx.Response:
+                request_payload = json.loads(request.content.decode("utf-8"))
+                prompt = request_payload["input"]
+                retry_requests.append(prompt)
+                page_text = "SECOND PAGE" if "SECOND PAGE" in prompt else "FIRST PAGE"
+                heading = "Second body" if "SECOND PAGE" in prompt else "First body"
+                return httpx.Response(
+                    200,
+                    json=responses_api_payload(
+                        json.dumps({"pages": [f"## {heading}\\n\\n{page_text}"]})
+                    ),
+                    request=request,
+                )
+
+            retry_transport = lambda **kwargs: SdkDefaultHttpxClient(
+                transport=httpx.MockTransport(succeed_all_sections),
+                **kwargs,
+            )
+            self._run_stage_b(
+                root,
+                manifest_path,
+                http_client_factory=retry_transport,
+                codex_home=codex_home,
+            )
+            self.assertEqual(1, len(retry_requests))
+            self.assertIn("SECOND PAGE", retry_requests[0])
+            self.assertTrue((output_dir / "section-list.json").exists())
+            self.assertFalse(failure_path.exists())
+
+    def test_stage_b_logs_html_section_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            codex_home = root / "codex-home"
+            self._write_codex_home(codex_home)
+            manifest_path = self._write_manifest(root, [self._html_section()])
+            requests: list[dict] = []
+            transport_factory = self._http_client_for_response(
+                json.dumps({"pages": ["## Generated body\\n\\nSDK split output."]}),
+                requests,
+            )
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                self._run_stage_b(
+                    root,
+                    manifest_path,
+                    http_client_factory=transport_factory,
+                    codex_home=codex_home,
+                )
+
+        self.assertIn("1/1", stderr.getvalue())
+        self.assertIn("1.1 SDK boundary", stderr.getvalue())
+        self.assertIn("complete", stderr.getvalue().lower())
 
     def test_stage_b_reads_the_standard_codex_home_when_code_home_is_unset(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -202,45 +366,49 @@ class HtmlPaginationCodexTest(unittest.TestCase):
             self.assertTrue(report_path.exists())
 
         self.assertEqual(0, exit_code)
-        self.assertEqual(["gpt-5.4"], [request["body"]["model"] for request in requests])
+        self.assertEqual(["gpt-6.1-terra"], [request["body"]["model"] for request in requests])
 
-    def test_stage_b_fails_without_codex_auth_and_ignores_legacy_command(self) -> None:
+    def test_stage_b_requires_the_active_provider_key_and_ignores_legacy_command(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            codex_home = root / "empty-codex-home"
-            codex_home.mkdir()
+            codex_home = root / "codex-home"
+            self._write_codex_home(codex_home, env_key="AZURE_OPENAI_API_KEY")
             manifest_path = self._write_manifest(root, [self._html_section()])
 
             def unexpected_http_client() -> None:
                 raise AssertionError("the SDK must not be initialized without Codex auth")
 
-            with self.assertRaisesRegex(RuntimeError, "Codex API-key authentication") as error:
+            with self.assertRaisesRegex(RuntimeError, "AZURE_OPENAI_API_KEY") as error:
                 self._run_stage_b(
                     root,
                     manifest_path,
                     http_client_factory=unexpected_http_client,
                     codex_home=codex_home,
-                    extra_env={"NLM_HTML_PAGINATION_COMMAND": "missing-legacy-command"},
+                    extra_env={
+                        "AZURE_OPENAI_API_KEY": "",
+                        "NLM_HTML_PAGINATION_COMMAND": "missing-legacy-command",
+                    },
                 )
 
         self.assertNotIn("temporary-test-key", str(error.exception))
 
-    def test_stage_b_rejects_non_api_key_authentication(self) -> None:
+    def test_stage_b_does_not_use_auth_json_key_when_provider_key_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             codex_home = root / "codex-home"
-            self._write_codex_home(codex_home, auth_mode="oauth")
+            self._write_codex_home(codex_home, env_key="AZURE_OPENAI_API_KEY")
             manifest_path = self._write_manifest(root, [self._html_section()])
 
             def unexpected_http_client() -> None:
                 raise AssertionError("the SDK must not be initialized with OAuth auth")
 
-            with self.assertRaisesRegex(RuntimeError, "requires API-key authentication"):
+            with self.assertRaisesRegex(RuntimeError, "AZURE_OPENAI_API_KEY"):
                 self._run_stage_b(
                     root,
                     manifest_path,
                     http_client_factory=unexpected_http_client,
                     codex_home=codex_home,
+                    extra_env={"AZURE_OPENAI_API_KEY": ""},
                 )
 
     def test_stage_b_rejects_invalid_active_provider_settings(self) -> None:
@@ -276,6 +444,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
     def test_stage_b_stops_on_sdk_and_page_validation_failures_without_exposing_key(self) -> None:
         cases = [
             ("SDK failure", RuntimeError("request failure: temporary-test-key"), "request failed"),
+            ("empty text", "", "did not contain text output"),
             ("invalid JSON", "not JSON", "valid JSON"),
             ("invalid page", json.dumps({"pages": [""]}), "must not be empty"),
         ]

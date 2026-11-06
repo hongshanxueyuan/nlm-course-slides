@@ -18,6 +18,7 @@ from common import (
     utc_timestamp,
     write_json,
 )
+from html_pagination_worker import apply_results
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,12 +27,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", help="Course output directory")
     parser.add_argument("--report-path", help="Optional section list output path")
     parser.add_argument("--course-scene", help="Course scene override")
+    parser.add_argument(
+        "--pagination-results-dir",
+        help="Use completed per-section HTML pagination worker results from this directory",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     manifest = load_course_manifest(args.manifest, course_scene=args.course_scene)
+    if args.pagination_results_dir:
+        apply_results(manifest, Path(args.pagination_results_dir).resolve())
     output_dir = Path(args.output_dir or sanitize_filename(manifest.course_title)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     materialize_markdown_artifacts(manifest, output_dir=output_dir)

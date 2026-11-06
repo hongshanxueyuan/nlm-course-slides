@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-from common import log_message, sanitize_filename, write_json
+from common import log_message, sanitize_filename, write_bytes_atomically, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Read the complete get_runtime_course_content JSON response from stdin",
     )
-    parser.add_argument("--course-name", required=True, help="Course name used to create the local course directory")
+    parser.add_argument(
+        "--course-name",
+        help="Optional course name; defaults to the name in the runtime JSON",
+    )
     parser.add_argument("--output-root", default=".", help="Root directory where the course directory should be created")
     parser.add_argument("--filename", help="Target JSON filename inside the course directory")
     parser.add_argument("--report-path", help="Optional course JSON report output path")
@@ -40,33 +43,48 @@ def read_course_json() -> bytes:
     return raw_json
 
 
+def course_name_from_json(raw_json: bytes) -> str:
+    payload = json.loads(raw_json.decode("utf-8"))
+    for key in ("name", "course_name", "course_title", "title"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    course_id = payload.get("course_id")
+    return str(course_id).strip() if course_id else "course"
+
+
 def main() -> int:
     args = build_parser().parse_args()
     raw_json = read_course_json()
+    course_name = args.course_name or course_name_from_json(raw_json)
 
-    course_dir = Path(args.output_root).resolve() / sanitize_filename(args.course_name, fallback="course")
+    course_dir = Path(args.output_root).resolve() / sanitize_filename(course_name, fallback="course")
     course_dir.mkdir(parents=True, exist_ok=True)
 
-    default_name = f"{sanitize_filename(args.course_name, fallback='course')}.json"
+    default_name = (
+        f"{sanitize_filename(course_name, fallback='course')}.json"
+        if args.course_name
+        else "course-content.json"
+    )
     target_file = course_dir / (args.filename or default_name)
 
     if target_file.exists() and not args.force:
         raise SystemExit(f"Target file already exists: {target_file}. Use --force to overwrite.")
 
-    log_message(f"[course-json] save get_runtime_course_content JSON to {target_file}")
-    target_file.write_bytes(raw_json)
+    log_message("[course-json] saved the complete runtime course JSON")
+    write_bytes_atomically(target_file, raw_json)
 
     report_path = Path(args.report_path).resolve() if args.report_path else course_dir / "course-json-report.json"
     report = {
         "status": "ready",
         "source_kind": "insights_mcp_server:get_runtime_course_content",
-        "course_name": args.course_name,
+        "course_name": course_name,
         "course_dir": str(course_dir),
         "json_path": str(target_file),
         "report_path": str(report_path),
     }
     write_json(report_path, report)
-    print(json.dumps(report, ensure_ascii=False))
+    print(json.dumps(report, ensure_ascii=True))
     return 0
 
 
