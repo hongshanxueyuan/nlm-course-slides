@@ -72,7 +72,7 @@ python3 scripts/prepare_course_json.py --json-stdin
 补充说明：
 
 - 对 `imagesgallery` 路线，阶段 B 先移除组件 `text` 中的所有反斜杠，再规范化已有分页文本。
-- 对需要模型分页的 `html` section，每节固定使用 `gpt-6.1-terra`，先由独立 Codex 子 agent 处理，再汇总写入 `section-list.json` 和对应 `.md` 文件。分页前读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
+- 对需要模型分页的 `html` section，每节固定使用 Codex 模型 `gpt-5.4`，先由独立 Codex 子 agent 处理，再汇总写入 `section-list.json` 和对应 `.md` 文件。分页前读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
 - 每个子 agent 只处理一个 `section_index`，运行分页 worker 并返回结果路径；分页内容留在结果文件中。
 - 对 `block_type=html` 的小节，阶段 B 会从最终页面列表中省略末尾独立标题为“本节要点”的页面；不会把摘要内容并入前一页，也不会改写源课程。该规则不影响 `imagesgallery`、末页标题为“总结”或“复盘”的页面，以及正文中提及“本节要点”的页面。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
