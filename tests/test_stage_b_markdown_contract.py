@@ -22,23 +22,53 @@ import upload_course_sections  # noqa: E402
 from fake_codex import run_stage_b_command  # noqa: E402
 
 
-WORKSPACE_ROOT = next(
-    (
-        parent
-        for parent in Path(__file__).resolve().parents
-        if (parent / "test" / "_files_dir").is_dir()
-    ),
-    Path(__file__).resolve().parents[2],
-)
-PURE_HTML_MANIFEST = (
-    WORKSPACE_ROOT
-    / "test"
-    / "_files_dir"
-    / "course-v1_FIRAx+211579+20260624.markdown.json"
-)
 MIXED_IMAGESGALLERY_MANIFEST = Path(
     "D:/work/ai建课/20260814/企业流程智能化-LTC流程智能化/fira_course-v1_FIRAx_1040045_20260807.json"
 )
+
+
+def create_pure_html_manifest(test_case: unittest.TestCase) -> Path:
+    tempdir = tempfile.TemporaryDirectory()
+    test_case.addCleanup(tempdir.cleanup)
+    manifest_path = Path(tempdir.name) / "pure-html-course.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "name": "测试课程",
+                "chapters": [
+                    {
+                        "name": "第一章",
+                        "sections": [
+                            {"name": "第一章"},
+                            {
+                                "name": "1.2 博弈规则——【法国】合规宽严度与生存策略",
+                                "verticals": [
+                                    {
+                                        "name": "正文",
+                                        "blocks": [
+                                            {
+                                                "category": "html",
+                                                "name": "文字讲解",
+                                                "text": (
+                                                    "<h2>博弈规则——【法国】合规宽严度与生存策略</h2>"
+                                                    "<p>法国合规要求与企业经营策略。</p>"
+                                                    "<h2>风险边界</h2><p>识别经营中的风险边界。</p>"
+                                                    "<h2>本节要点</h2><p>回顾本节的关键内容。</p>"
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
 
 
 class StageBMarkdownContractTest(unittest.TestCase):
@@ -92,7 +122,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         )
 
     def test_stage_b_uses_markdown_rendered_html_route(self) -> None:
-        payload, snapshot_dir = self._run_stage_b(PURE_HTML_MANIFEST)
+        payload, snapshot_dir = self._run_stage_b(create_pure_html_manifest(self))
         section = self._find_section(
             payload,
             "1.2 博弈规则——【法国】合规宽严度与生存策略",
@@ -821,7 +851,7 @@ class StageCMarkdownUploadTest(unittest.TestCase):
 
     def test_stage_c_uploads_canonical_markdown_for_html_fixture(self) -> None:
         self._assert_fixture_stage_c_uploads_canonical_markdown(
-            PURE_HTML_MANIFEST,
+            create_pure_html_manifest(self),
             "1.2 博弈规则——【法国】合规宽严度与生存策略",
             "html",
         )

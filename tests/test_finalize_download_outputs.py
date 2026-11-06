@@ -114,8 +114,14 @@ class FinalizeDownloadOutputsTest(unittest.TestCase):
             report = json.loads((output_dir / "finalize-report.json").read_text(encoding="utf-8"))
             result = report["results"][0]
             markdown_path = output_dir / "1.1 测试小节.md"
-            self.assertEqual(str(output_dir / "1.1 测试小节.pptx"), result["output_path"])
-            self.assertEqual(str(markdown_path), result["markdown_output_path"])
+            self.assertEqual(
+                (output_dir / "1.1 测试小节.pptx").resolve(),
+                Path(result["output_path"]).resolve(),
+            )
+            self.assertEqual(
+                markdown_path.resolve(),
+                Path(result["markdown_output_path"]).resolve(),
+            )
             self.assertNotIn("_水印版", result["output_path"])
             self.assertTrue(markdown_path.exists())
             self.assertEqual("## 标题\n\n正文\n", markdown_path.read_text(encoding="utf-8"))
