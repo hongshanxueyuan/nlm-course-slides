@@ -19,7 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+import openai
 from markdownify import markdownify as html_to_markdown
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 
 
 class _FcntlLike(Protocol):
@@ -115,7 +121,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
 SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
-HTML_PAGINATION_COMMAND_ENV = "NLM_HTML_PAGINATION_COMMAND"
+HTML_PAGINATION_MODEL = "gpt-5.4"
 HTML_PAGINATION_RULES_PATH = (
     Path(__file__).resolve().parent.parent / "references" / "html-pagination-rules.md"
 )
@@ -326,14 +332,6 @@ def _normalize_explicit_page_content(page_content: list[str]) -> list[str]:
     return pages
 
 
-def _heading_level(block: str) -> int | None:
-    first_line = block.splitlines()[0].strip()
-    match = re.match(r"^(#{1,6})\s+(.+)$", first_line)
-    if not match:
-        return None
-    return len(match.group(1))
-
-
 def _heading_text(block: str) -> str | None:
     first_line = block.splitlines()[0].strip()
     match = re.match(r"^#{1,6}\s+(.+)$", first_line)
@@ -375,56 +373,6 @@ def _omit_trailing_key_points_page(pages: list[str]) -> list[str]:
     if pages and _heading_text(pages[-1]) == "本节要点":
         return pages[:-1]
     return pages
-
-
-def _split_markdown_blocks(text: str) -> list[str]:
-    return [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
-
-
-def _group_blocks_into_units(blocks: list[str]) -> list[str]:
-    units: list[str] = []
-    current: list[str] = []
-    for block in blocks:
-        level = _heading_level(block)
-        if current and (level is not None and level <= 2):
-            units.append("\n\n".join(current).strip())
-            current = [block]
-            continue
-        if current and _is_summary_block(block):
-            units.append("\n\n".join(current).strip())
-            current = [block]
-            continue
-        current.append(block)
-    if current:
-        units.append("\n\n".join(current).strip())
-    return [unit for unit in units if unit]
-
-
-def _split_long_unit(unit: str, *, max_chars: int = 1800) -> list[str]:
-    if len(unit) <= max_chars:
-        return [unit]
-
-    blocks = _split_markdown_blocks(unit)
-    split_units: list[str] = []
-    current: list[str] = []
-    current_len = 0
-    for block in blocks:
-        level = _heading_level(block)
-        next_len = current_len + len(block)
-        should_split = current and (
-            (level is not None and level >= 3 and current_len >= max_chars // 2)
-            or (next_len > max_chars and current_len >= max_chars // 2)
-        )
-        if should_split:
-            split_units.append("\n\n".join(current).strip())
-            current = [block]
-            current_len = len(block)
-            continue
-        current.append(block)
-        current_len = next_len + 2
-    if current:
-        split_units.append("\n\n".join(current).strip())
-    return [split_unit for split_unit in split_units if split_unit]
 
 
 def _chunk_units(units: list[str], chunk_count: int) -> list[str]:
@@ -506,58 +454,87 @@ def _parse_html_pagination_model_output(raw_output: str) -> list[str]:
     return _normalize_explicit_page_content(pages)
 
 
-def _run_html_pagination_model(prompt: str) -> list[str] | None:
-    command = os.environ.get(HTML_PAGINATION_COMMAND_ENV, "").strip()
-    if not command:
-        return None
-
-    args = shlex.split(command, posix=os.name != "nt")
-    result = subprocess.run(
-        args,
-        input=prompt,
-        text=True,
-        capture_output=True,
-        check=False,
+def _load_codex_html_pagination_config() -> tuple[str, str, str]:
+    configured_home = os.environ.get("CODEX_HOME", "").strip()
+    codex_home = (
+        Path(configured_home).expanduser()
+        if configured_home
+        else Path.home() / ".codex"
     )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
+    auth_path = codex_home / "auth.json"
+    config_path = codex_home / "config.toml"
+
+    try:
+        auth = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         raise RuntimeError(
-            f"html pagination model command failed with exit code {result.returncode}: {stderr or 'no stderr'}"
+            "html pagination requires readable Codex API-key authentication"
+        ) from None
+    if not isinstance(auth, dict):
+        raise RuntimeError("html pagination requires Codex API-key authentication")
+
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        raise RuntimeError("html pagination requires a readable Codex config.toml") from None
+
+    auth_mode = auth.get("auth_mode", config.get("auth_mode"))
+    api_key = auth.get("OPENAI_API_KEY")
+    if auth_mode != "apikey" or not isinstance(api_key, str) or not api_key.strip():
+        raise RuntimeError(
+            "html pagination requires API-key authentication in Codex auth.json"
         )
-    return _parse_html_pagination_model_output(result.stdout)
+
+    provider_name = config.get("model_provider")
+    providers = config.get("model_providers")
+    if not isinstance(provider_name, str) or not provider_name.strip():
+        raise RuntimeError("html pagination requires an active Codex model provider")
+    provider = providers.get(provider_name) if isinstance(providers, dict) else None
+    if not isinstance(provider, dict):
+        raise RuntimeError("html pagination requires an active Codex model provider")
+
+    base_url = provider.get("base_url")
+    wire_api = provider.get("wire_api")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise RuntimeError("active Codex model provider is missing base_url")
+    if not isinstance(wire_api, str) or wire_api not in {"responses", "chat"}:
+        raise RuntimeError("active Codex model provider has an unsupported wire_api")
+    return api_key.strip(), base_url.strip(), wire_api
 
 
-def _paginate_markdown_content_with_rules(
-    text: str,
-    *,
-    rules: str,
-    omit_trailing_key_points_page: bool = False,
-) -> list[str]:
-    normalized = _clean_page_body(text)
-    if not normalized:
-        raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
+def _run_html_pagination_model(prompt: str) -> list[str]:
+    api_key, base_url, wire_api = _load_codex_html_pagination_config()
+    try:
+        with openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=openai.DefaultHttpxClient(),
+        ) as client:
+            if wire_api == "responses":
+                response = client.responses.create(
+                    model=HTML_PAGINATION_MODEL,
+                    input=prompt,
+                )
+                raw_output = getattr(response, "output_text", None)
+            else:
+                response = client.chat.completions.create(
+                    model=HTML_PAGINATION_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                choices = getattr(response, "choices", None)
+                raw_output = (
+                    getattr(getattr(choices[0], "message", None), "content", None)
+                    if choices
+                    else None
+                )
+    except Exception as exc:
+        raise RuntimeError(
+            f"html pagination GPT-5.4 request failed ({type(exc).__name__})"
+        ) from None
 
-    blocks = _split_markdown_blocks(normalized)
-    units = _group_blocks_into_units(blocks)
-    expanded_units: list[str] = []
-    for unit in units:
-        expanded_units.extend(_split_long_unit(unit))
-    if omit_trailing_key_points_page:
-        expanded_units = _omit_trailing_key_points_page(expanded_units)
-
-    pages = _collapse_units_to_page_limit(
-        expanded_units,
-        max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
-        preserve_summary_page=_requires_summary_tail_preservation(rules),
-    )
-    normalized_pages = [_clean_page_body(page) for page in pages if _clean_page_body(page)]
-    if not normalized_pages:
-        if omit_trailing_key_points_page and not expanded_units:
-            return []
-        raise RuntimeError("html pagination did not produce any pages")
-    if len(normalized_pages) > HTML_PAGINATION_COVER_BODY_MAX_PAGES:
-        raise RuntimeError("html pagination exceeded the 19-page body contract")
-    return normalized_pages
+    if not isinstance(raw_output, str) or not raw_output.strip():
+        raise RuntimeError("html pagination GPT-5.4 response did not contain text output")
+    return _parse_html_pagination_model_output(raw_output)
 
 
 def paginate_markdown_content(
@@ -572,18 +549,12 @@ def paginate_markdown_content(
 
     prompt = build_html_pagination_prompt(normalized, rules=rules)
     model_pages = _run_html_pagination_model(prompt)
-    if model_pages is not None:
-        if omit_trailing_key_points_page:
-            model_pages = _omit_trailing_key_points_page(model_pages)
-        return _collapse_units_to_page_limit(
-            model_pages,
-            max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
-            preserve_summary_page=_requires_summary_tail_preservation(rules),
-        )
-    return _paginate_markdown_content_with_rules(
-        normalized,
-        rules=rules,
-        omit_trailing_key_points_page=omit_trailing_key_points_page,
+    if omit_trailing_key_points_page:
+        model_pages = _omit_trailing_key_points_page(model_pages)
+    return _collapse_units_to_page_limit(
+        model_pages,
+        max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
+        preserve_summary_page=_requires_summary_tail_preservation(rules),
     )
 
 

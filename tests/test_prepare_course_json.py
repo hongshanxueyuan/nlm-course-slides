@@ -122,7 +122,11 @@ class PrepareCourseJsonTest(unittest.TestCase):
         )
         paginated_input: list[str] = []
 
-        def fake_paginate(text: str) -> list[str]:
+        def fake_paginate(
+            text: str,
+            *,
+            omit_trailing_key_points_page: bool = False,
+        ) -> list[str]:
             paginated_input.append(text)
             return ["## Visible heading\n\nVisible text"]
 
