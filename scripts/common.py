@@ -5,6 +5,7 @@ Shared helpers for the nlm-course-slides skill.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -13,8 +14,9 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -121,7 +123,10 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
 SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
-HTML_PAGINATION_MODEL = "gpt-5.4"
+HTML_PAGINATION_MODEL = "gpt-6.1-terra"
+HTML_PAGINATION_REQUEST_TIMEOUT_SECONDS = 120.0
+HTML_PAGINATION_CACHE_FILENAME = ".html-pagination-cache.json"
+HTML_PAGINATION_FAILURE_REPORT_FILENAME = "section-list-failure.json"
 HTML_PAGINATION_RULES_PATH = (
     Path(__file__).resolve().parent.parent / "references" / "html-pagination-rules.md"
 )
@@ -143,6 +148,57 @@ class Section:
     page_content: list[str] | None = None
     page_count: int | None = None
     source_blocks: list[SectionSourceBlock] | None = None
+
+
+@dataclass(frozen=True)
+class CodexProviderConfig:
+    provider_name: str
+    base_url: str
+    wire_api: str
+    env_key: str
+    api_key: str = field(repr=False)
+    auth_header_name: str | None = None
+
+
+class HtmlPaginationCache:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.RLock()
+        self._entries: dict[str, dict[str, Any]] = {}
+        try:
+            payload = read_json(path)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        entries = payload.get("sections")
+        if payload.get("version") == 1 and isinstance(entries, dict):
+            self._entries = {
+                section_id: entry
+                for section_id, entry in entries.items()
+                if isinstance(section_id, str) and isinstance(entry, dict)
+            }
+
+    def get(self, section_id: str, request_hash: str) -> list[str] | None:
+        with self._lock:
+            entry = self._entries.get(section_id)
+            if not entry or entry.get("request_hash") != request_hash:
+                return None
+            pages = entry.get("pages")
+            if not isinstance(pages, list):
+                return None
+            try:
+                return _normalize_explicit_page_content(pages)
+            except RuntimeError:
+                return None
+
+    def store(self, section_id: str, request_hash: str, pages: list[str]) -> None:
+        with self._lock:
+            self._entries[section_id] = {
+                "request_hash": request_hash,
+                "pages": pages,
+            }
+            write_json(self.path, {"version": 1, "sections": self._entries})
 
 
 @dataclass
@@ -427,6 +483,21 @@ def build_html_pagination_prompt(text: str, *, rules: str) -> str:
     return "\n\n".join([rules, text])
 
 
+def prepare_html_pagination_request(text: str) -> tuple[str, str, str]:
+    rules = load_html_pagination_rules()
+    normalized = _clean_page_body(text)
+    if not normalized:
+        raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
+    prompt = build_html_pagination_prompt(normalized, rules=rules)
+    request_hash = hashlib.sha256(
+        json.dumps(
+            [HTML_PAGINATION_MODEL, prompt],
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return rules, prompt, request_hash
+
+
 def _extract_json_payload(raw_output: str) -> str:
     stripped = raw_output.strip()
     if stripped.startswith("```"):
@@ -454,36 +525,19 @@ def _parse_html_pagination_model_output(raw_output: str) -> list[str]:
     return _normalize_explicit_page_content(pages)
 
 
-def _load_codex_html_pagination_config() -> tuple[str, str, str]:
+def _load_codex_html_pagination_config() -> CodexProviderConfig:
     configured_home = os.environ.get("CODEX_HOME", "").strip()
     codex_home = (
         Path(configured_home).expanduser()
         if configured_home
         else Path.home() / ".codex"
     )
-    auth_path = codex_home / "auth.json"
     config_path = codex_home / "config.toml"
-
-    try:
-        auth = json.loads(auth_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise RuntimeError(
-            "html pagination requires readable Codex API-key authentication"
-        ) from None
-    if not isinstance(auth, dict):
-        raise RuntimeError("html pagination requires Codex API-key authentication")
 
     try:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         raise RuntimeError("html pagination requires a readable Codex config.toml") from None
-
-    auth_mode = auth.get("auth_mode", config.get("auth_mode"))
-    api_key = auth.get("OPENAI_API_KEY")
-    if auth_mode != "apikey" or not isinstance(api_key, str) or not api_key.strip():
-        raise RuntimeError(
-            "html pagination requires API-key authentication in Codex auth.json"
-        )
 
     provider_name = config.get("model_provider")
     providers = config.get("model_providers")
@@ -495,22 +549,52 @@ def _load_codex_html_pagination_config() -> tuple[str, str, str]:
 
     base_url = provider.get("base_url")
     wire_api = provider.get("wire_api")
+    env_key = provider.get("env_key")
     if not isinstance(base_url, str) or not base_url.strip():
         raise RuntimeError("active Codex model provider is missing base_url")
     if not isinstance(wire_api, str) or wire_api not in {"responses", "chat"}:
         raise RuntimeError("active Codex model provider has an unsupported wire_api")
-    return api_key.strip(), base_url.strip(), wire_api
+    if not isinstance(env_key, str) or not env_key.strip():
+        raise RuntimeError("active Codex model provider is missing env_key")
+    api_key = os.environ.get(env_key)
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise RuntimeError(
+            f"active Codex model provider requires environment variable {env_key}"
+        )
+    auth_header_name = (
+        "api-key"
+        if provider_name.casefold() == "azure" or env_key.upper().startswith("AZURE_")
+        else None
+    )
+    return CodexProviderConfig(
+        provider_name=provider_name,
+        base_url=base_url.strip(),
+        wire_api=wire_api,
+        env_key=env_key,
+        api_key=api_key.strip(),
+        auth_header_name=auth_header_name,
+    )
 
 
 def _run_html_pagination_model(prompt: str) -> list[str]:
-    api_key, base_url, wire_api = _load_codex_html_pagination_config()
+    provider_config = _load_codex_html_pagination_config()
+    default_headers = (
+        {provider_config.auth_header_name: provider_config.api_key}
+        if provider_config.auth_header_name
+        else None
+    )
     try:
         with openai.OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=openai.DefaultHttpxClient(),
+            api_key=provider_config.api_key,
+            base_url=provider_config.base_url,
+            default_headers=default_headers,
+            timeout=HTML_PAGINATION_REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,
+            http_client=openai.DefaultHttpxClient(
+                timeout=HTML_PAGINATION_REQUEST_TIMEOUT_SECONDS
+            ),
         ) as client:
-            if wire_api == "responses":
+            if provider_config.wire_api == "responses":
                 response = client.responses.create(
                     model=HTML_PAGINATION_MODEL,
                     input=prompt,
@@ -529,11 +613,22 @@ def _run_html_pagination_model(prompt: str) -> list[str]:
                 )
     except Exception as exc:
         raise RuntimeError(
-            f"html pagination GPT-5.4 request failed ({type(exc).__name__})"
+            f"html pagination {HTML_PAGINATION_MODEL} request failed ({type(exc).__name__})"
         ) from None
 
     if not isinstance(raw_output, str) or not raw_output.strip():
-        raise RuntimeError("html pagination GPT-5.4 response did not contain text output")
+        status = getattr(response, "status", None)
+        incomplete_details = getattr(response, "incomplete_details", None)
+        incomplete_reason = getattr(incomplete_details, "reason", None)
+        details = []
+        if status:
+            details.append(f"status={status}")
+        if incomplete_reason:
+            details.append(f"reason={incomplete_reason}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        raise RuntimeError(
+            f"html pagination GPT-6.1 Terra response did not contain text output{suffix}"
+        )
     return _parse_html_pagination_model_output(raw_output)
 
 
@@ -541,21 +636,42 @@ def paginate_markdown_content(
     text: str,
     *,
     omit_trailing_key_points_page: bool = False,
+    section_id: str | None = None,
+    pagination_cache: HtmlPaginationCache | None = None,
 ) -> list[str]:
-    rules = load_html_pagination_rules()
-    normalized = _clean_page_body(text)
-    if not normalized:
-        raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
-
-    prompt = build_html_pagination_prompt(normalized, rules=rules)
-    model_pages = _run_html_pagination_model(prompt)
+    rules, prompt, request_hash = prepare_html_pagination_request(text)
+    model_pages = (
+        pagination_cache.get(section_id, request_hash)
+        if pagination_cache is not None and section_id is not None
+        else None
+    )
+    if model_pages is not None:
+        log_message(f"[stage-b] section {section_id}: reusing cached HTML pages")
+    else:
+        started_at = time.monotonic()
+        if section_id:
+            log_message(
+                f"[stage-b] section {section_id}: {HTML_PAGINATION_MODEL} request started"
+            )
+        try:
+            model_pages = _run_html_pagination_model(prompt)
+        except Exception:
+            if section_id:
+                elapsed = time.monotonic() - started_at
+                log_message(
+                    f"[stage-b] section {section_id}: pagination failed after {elapsed:.1f}s"
+                )
+            raise
     if omit_trailing_key_points_page:
         model_pages = _omit_trailing_key_points_page(model_pages)
-    return _collapse_units_to_page_limit(
+    pages = _collapse_units_to_page_limit(
         model_pages,
         max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
         preserve_summary_page=_requires_summary_tail_preservation(rules),
     )
+    if model_pages is not None and pagination_cache is not None and section_id is not None:
+        pagination_cache.store(section_id, request_hash, pages)
+    return pages
 
 
 def _strip_legacy_preface(
@@ -772,6 +888,8 @@ def materialize_section_markdown(
     output_dir: Path,
     default_block_type: str,
     include_cover: bool = False,
+    write_artifact: bool = True,
+    pagination_cache: HtmlPaginationCache | None = None,
 ) -> Path:
     block_type = _resolve_section_block_type(section, default_block_type=default_block_type)
     md_name = _resolve_section_md_name(section)
@@ -789,6 +907,8 @@ def materialize_section_markdown(
         pages = paginate_markdown_content(
             _select_html_source_text(section),
             omit_trailing_key_points_page=True,
+            section_id=section.id,
+            pagination_cache=pagination_cache,
         )
 
     if section.page_count is not None and section.page_count != len(pages):
@@ -814,7 +934,8 @@ def materialize_section_markdown(
         )
 
     md_path = output_dir / md_name
-    md_path.write_text(serialize_canonical_markdown(pages), encoding="utf-8")
+    if write_artifact:
+        write_text_atomically(md_path, serialize_canonical_markdown(pages))
 
     section.md_name = md_name
     section.block_type = block_type
@@ -828,13 +949,54 @@ def materialize_markdown_artifacts(
     *,
     output_dir: Path,
 ) -> None:
-    for section in manifest.sections:
-        materialize_section_markdown(
-            section,
-            output_dir=output_dir,
-            default_block_type=manifest.default_block_type,
-            include_cover=manifest.course_scene in COURSE_SCENES_WITH_COVER,
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pagination_cache = HtmlPaginationCache(output_dir / HTML_PAGINATION_CACHE_FILENAME)
+    failure_report_path = output_dir / HTML_PAGINATION_FAILURE_REPORT_FILENAME
+    total = len(manifest.sections)
+    completed_sections: list[str] = []
+
+    for index, section in enumerate(manifest.sections, start=1):
+        title = " ".join(section.title.split())
+        progress = f"[stage-b] {index}/{total} section {section.id} {title}"
+        log_message(f"{progress}: started")
+        try:
+            materialize_section_markdown(
+                section,
+                output_dir=output_dir,
+                default_block_type=manifest.default_block_type,
+                include_cover=manifest.course_scene in COURSE_SCENES_WITH_COVER,
+                write_artifact=False,
+                pagination_cache=pagination_cache,
+            )
+        except Exception as exc:
+            log_message(f"{progress}: failed: {exc}")
+            write_json(
+                failure_report_path,
+                {
+                    "status": "failed",
+                    "course_title": manifest.course_title,
+                    "manifest": manifest.source_path,
+                    "failed_section_id": section.id,
+                    "failed_section_title": section.title,
+                    "completed_section_ids": completed_sections,
+                    "error": str(exc),
+                    "cache_path": str(pagination_cache.path),
+                },
+            )
+            raise
+        completed_sections.append(section.id)
+        log_message(
+            f"{progress}: complete (pages={section.page_count})"
         )
+
+    for section in manifest.sections:
+        if section.md_name is None or section.page_content is None:
+            raise RuntimeError(f"Section {section.id} is missing prepared Markdown data")
+        write_text_atomically(
+            output_dir / section.md_name,
+            serialize_canonical_markdown(section.page_content),
+        )
+    failure_report_path.unlink(missing_ok=True)
 
 
 def build_section_list_entry(section: Section) -> dict[str, Any]:
@@ -1383,11 +1545,42 @@ def download_slide_deck(
             time.sleep(retry_delay_seconds)
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
+def write_text_atomically(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding, newline="\n") as handle:
+            handle.write(text)
+        os.replace(temp_name, path)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+def write_bytes_atomically(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        os.replace(temp_name, path)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    write_text_atomically(
+        path,
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
 
 

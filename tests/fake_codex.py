@@ -24,7 +24,7 @@ def responses_api_payload(output_text: str) -> dict:
         "object": "response",
         "created_at": 0,
         "status": "completed",
-        "model": "gpt-5.4",
+        "model": "gpt-6.1-terra",
         "output": [
             {
                 "id": "msg_test",
@@ -43,7 +43,7 @@ def responses_api_payload(output_text: str) -> dict:
     }
 
 
-def _fake_sdk_http_client():
+def _fake_sdk_http_client(**kwargs):
     def send(request):
         request_payload = json.loads(request.content.decode("utf-8"))
         prompt = request_payload.get("input", "")
@@ -61,7 +61,10 @@ def _fake_sdk_http_client():
             request=request,
         )
 
-    return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send))
+    return SdkDefaultHttpxClient(
+        transport=sdk_httpx.MockTransport(send),
+        **kwargs,
+    )
 
 
 def _write_fake_codex_home(parent: Path) -> Path:
@@ -76,6 +79,7 @@ def _write_fake_codex_home(parent: Path) -> Path:
         'model_provider = "azure"\n'
         "[model_providers.azure]\n"
         'base_url = "https://provider.example.test/v1"\n'
+        'env_key = "AZURE_OPENAI_API_KEY"\n'
         'wire_api = "responses"\n',
         encoding="utf-8",
     )
@@ -100,7 +104,13 @@ def run_stage_b_command(
         *(extra_args or []),
     ]
     with (
-        patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+        patch.dict(
+            os.environ,
+            {
+                "CODEX_HOME": str(codex_home),
+                "AZURE_OPENAI_API_KEY": "temporary-azure-key",
+            },
+        ),
         patch("openai.DefaultHttpxClient", side_effect=_fake_sdk_http_client),
         patch.object(sys, "argv", argv),
         redirect_stdout(StringIO()),

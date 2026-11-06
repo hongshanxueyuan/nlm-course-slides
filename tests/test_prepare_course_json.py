@@ -19,6 +19,32 @@ import prepare_course_json  # noqa: E402
 
 
 class PrepareCourseJsonTest(unittest.TestCase):
+    def test_derives_chinese_course_name_from_json_and_uses_ascii_filename(self) -> None:
+        raw_json = '{"name":"数字化营销质量管理","chapters":[]}'.encode("utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "courses"
+            argv = [
+                "prepare_course_json.py",
+                "--json-stdin",
+                "--output-root",
+                str(output_root),
+            ]
+            stdin = io.TextIOWrapper(io.BytesIO(raw_json), encoding="utf-8")
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(sys, "stdin", stdin),
+                redirect_stdout(io.StringIO()) as stdout,
+            ):
+                self.assertEqual(0, prepare_course_json.main())
+
+            course_dir = output_root / "数字化营销质量管理"
+            json_path = course_dir / "course-content.json"
+            report = json.loads((course_dir / "course-json-report.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw_json, json_path.read_bytes())
+            self.assertEqual("数字化营销质量管理", report["course_name"])
+            self.assertEqual(str(json_path.resolve()), report["json_path"])
+            self.assertEqual(report, json.loads(stdout.getvalue()))
+
     def test_saves_complete_stdin_json_without_rewriting(self) -> None:
         raw_json = b'{\n  "name": "Runtime course", "chapters": []\n}\n'
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,6 +152,8 @@ class PrepareCourseJsonTest(unittest.TestCase):
             text: str,
             *,
             omit_trailing_key_points_page: bool = False,
+            section_id: str | None = None,
+            pagination_cache: common.HtmlPaginationCache | None = None,
         ) -> list[str]:
             paginated_input.append(text)
             return ["## Visible heading\n\nVisible text"]
