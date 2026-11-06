@@ -22,9 +22,13 @@ httpx = importlib.import_module(
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 import common  # noqa: E402
 import list_course_sections  # noqa: E402
+from fake_codex import responses_api_payload  # noqa: E402
 
 
 class HtmlPaginationCodexTest(unittest.TestCase):
@@ -122,28 +126,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
                 )
             return httpx.Response(
                 200,
-                json={
-                    "id": "resp_test",
-                    "object": "response",
-                    "created_at": 0,
-                    "status": "completed",
-                    "model": "gpt-5.4",
-                    "output": [
-                        {
-                            "id": "msg_test",
-                            "type": "message",
-                            "status": "completed",
-                            "role": "assistant",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "annotations": [],
-                                    "text": response_or_error,
-                                }
-                            ],
-                        }
-                    ],
-                },
+                json=responses_api_payload(response_or_error),
                 request=request,
             )
 

@@ -18,6 +18,31 @@ sdk_httpx = importlib.import_module(
 )
 
 
+def responses_api_payload(output_text: str) -> dict:
+    return {
+        "id": "resp_test",
+        "object": "response",
+        "created_at": 0,
+        "status": "completed",
+        "model": "gpt-5.4",
+        "output": [
+            {
+                "id": "msg_test",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "annotations": [],
+                        "text": output_text,
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def _fake_sdk_http_client():
     def send(request):
         request_payload = json.loads(request.content.decode("utf-8"))
@@ -32,28 +57,7 @@ def _fake_sdk_http_client():
         response_text = json.dumps({"pages": pages}, ensure_ascii=False)
         return sdk_httpx.Response(
             200,
-            json={
-                "id": "resp_test",
-                "object": "response",
-                "created_at": 0,
-                "status": "completed",
-                "model": "gpt-5.4",
-                "output": [
-                    {
-                        "id": "msg_test",
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "annotations": [],
-                                "text": response_text,
-                            }
-                        ],
-                    }
-                ],
-            },
+            json=responses_api_payload(response_text),
             request=request,
         )
 
