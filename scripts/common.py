@@ -354,6 +354,18 @@ def _remove_duplicate_cover_heading(pages: list[str], *, title: str) -> list[str
     return remaining_pages
 
 
+def _remove_duplicate_title_only_pages(pages: list[str], *, title: str) -> list[str]:
+    filtered_pages: list[str] = []
+    for page in pages:
+        non_empty_lines = [line.strip() for line in page.splitlines() if line.strip()]
+        is_duplicate_title_page = (
+            len(non_empty_lines) == 1 and _heading_text(non_empty_lines[0]) == title
+        )
+        if not is_duplicate_title_page:
+            filtered_pages.append(page)
+    return filtered_pages
+
+
 def _is_summary_block(block: str) -> bool:
     title = _heading_text(block)
     return bool(title and title in SUMMARY_HEADING_TEXTS)
@@ -817,6 +829,7 @@ def materialize_section_markdown(
     if include_cover:
         cover_title = strip_section_prefix(section.title)
         pages = _remove_duplicate_cover_heading(pages, title=cover_title)
+        pages = _remove_duplicate_title_only_pages(pages, title=cover_title)
         pages = _collapse_units_to_page_limit(
             pages,
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
