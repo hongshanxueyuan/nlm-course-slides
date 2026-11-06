@@ -187,7 +187,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         self.assertEqual("Bearer temporary-azure-key", requests[0]["authorization"])
         self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
         self.assertLessEqual(requests[0]["timeout"]["read"], 120)
-        self.assertEqual("gpt-6.1-terra", requests[0]["body"]["model"])
+        self.assertEqual("gpt-5.4", requests[0]["body"]["model"])
         self.assertIn("Rendered course text.", requests[0]["body"]["input"])
         self.assertEqual(
             ["# SDK boundary", "## Generated body\n\nSDK split output."],
@@ -366,7 +366,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
             self.assertTrue(report_path.exists())
 
         self.assertEqual(0, exit_code)
-        self.assertEqual(["gpt-6.1-terra"], [request["body"]["model"] for request in requests])
+        self.assertEqual(["gpt-5.4"], [request["body"]["model"] for request in requests])
 
     def test_stage_b_requires_the_active_provider_key_and_ignores_legacy_command(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

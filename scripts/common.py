@@ -123,7 +123,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
 SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
-HTML_PAGINATION_MODEL = "gpt-6.1-terra"
+HTML_PAGINATION_MODEL = "gpt-5.4"
 HTML_PAGINATION_REQUEST_TIMEOUT_SECONDS = 120.0
 HTML_PAGINATION_CACHE_FILENAME = ".html-pagination-cache.json"
 HTML_PAGINATION_FAILURE_REPORT_FILENAME = "section-list-failure.json"
@@ -627,7 +627,7 @@ def _run_html_pagination_model(prompt: str) -> list[str]:
             details.append(f"reason={incomplete_reason}")
         suffix = f" ({', '.join(details)})" if details else ""
         raise RuntimeError(
-            f"html pagination GPT-6.1 Terra response did not contain text output{suffix}"
+            f"html pagination GPT-5.4 response did not contain text output{suffix}"
         )
     return _parse_html_pagination_model_output(raw_output)
 
