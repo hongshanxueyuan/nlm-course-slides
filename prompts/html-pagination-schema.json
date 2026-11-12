@@ -13,7 +13,7 @@
           },
           "content": {
             "type": "string",
-            "description": "本页ppt的原文，确保和原文档内容一致，且保留格式，不要丢失标题"
+            "description": "本页ppt的原文，保留标题、正文和格式；按提示词省略代码块外的水平分隔线"
           }
         },
         "required": [
