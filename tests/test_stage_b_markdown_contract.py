@@ -383,7 +383,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                     ),
                 )
 
-    def test_stage_b_preserves_cover_title_when_repeated_in_body(self) -> None:
+    def test_stage_b_removes_cover_title_from_first_body_page(self) -> None:
         cover_title = "从 AI 建议转向建议执行监督闭环"
         body_pages = [
             f"# {cover_title}\n\n本节介绍的是{cover_title}。",
@@ -416,18 +416,27 @@ class StageBMarkdownContractTest(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                payload, _output_dir = self._run_stage_b(manifest_path)
+                payload, output_dir = self._run_stage_b(manifest_path)
                 section = payload["sections"][0]
+                md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
                 self.assertEqual(
                     [
                         f"# {cover_title}",
-                        f"# {cover_title}\n\n本节介绍的是{cover_title}。",
+                        f"本节介绍的是{cover_title}。",
                         f"## {cover_title}\n\n后续正文。",
                     ],
                     section["page_content"],
                 )
                 self.assertEqual(3, section["page_count"])
+                self.assertEqual(
+                    section["page_content"],
+                    common.parse_canonical_markdown_pages(
+                        md_body,
+                        section_title=section["section_title"],
+                        output_stem=Path(section["md_name"]).stem,
+                    ),
+                )
 
     def test_stage_b_merges_imagesgallery_pages_before_adding_cover(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
