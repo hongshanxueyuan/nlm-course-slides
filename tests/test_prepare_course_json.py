@@ -141,7 +141,7 @@ class PrepareCourseJsonTest(unittest.TestCase):
             source_blocks=[
                 common.SectionSourceBlock(
                     category="html",
-                    name="HTML content",
+                    name="文字讲解",
                     text=raw_html,
                 )
             ],
@@ -152,8 +152,10 @@ class PrepareCourseJsonTest(unittest.TestCase):
             text: str,
             *,
             section_id: str | None = None,
+            cache_key: str | None = None,
             pagination_cache: common.HtmlPaginationCache | None = None,
             model_output_path: Path | None = None,
+            request: common.HtmlPaginationRequest | None = None,
         ) -> list[str]:
             paginated_input.append(text)
             return ["## Visible heading\n\nVisible text"]

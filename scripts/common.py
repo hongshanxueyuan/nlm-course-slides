@@ -119,7 +119,7 @@ HTML_SCRIPT_BLOCK_RE = re.compile(
 HTML_HEAD_BLOCK_RE = re.compile(
     r"<head\b[^>]*>.*?</head>", flags=re.IGNORECASE | re.DOTALL
 )
-EMPTY_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s*$")
+EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
@@ -165,6 +165,17 @@ class CodexProviderConfig:
     auth_header_name: str | None = None
 
 
+@dataclass(frozen=True, repr=False)
+class HtmlPaginationRequest:
+    system_prompt: str
+    prompt: str
+    schema: dict[str, Any]
+    provider: CodexProviderConfig
+    model: str
+    reasoning_effort: str
+    request_hash: str
+
+
 class HtmlPaginationCache:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -177,7 +188,7 @@ class HtmlPaginationCache:
         if not isinstance(payload, dict):
             return
         entries = payload.get("sections")
-        if payload.get("version") == 2 and isinstance(entries, dict):
+        if payload.get("version") == 3 and isinstance(entries, dict):
             self._entries = {
                 section_id: entry
                 for section_id, entry in entries.items()
@@ -202,7 +213,7 @@ class HtmlPaginationCache:
     def store(self, section_id: str, request_hash: str, payload: dict[str, Any]) -> None:
         with self._lock:
             self._entries[section_id] = {"request_hash": request_hash, "model_output": payload}
-            write_json(self.path, {"version": 2, "sections": self._entries})
+            write_json(self.path, {"version": 3, "sections": self._entries})
 
 
 @dataclass
@@ -327,9 +338,32 @@ def _normalize_newlines(text: str) -> str:
 
 
 def _strip_empty_heading_blocks(text: str) -> str:
-    blocks = [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
-    kept = [block for block in blocks if not EMPTY_MARKDOWN_HEADING_RE.fullmatch(block)]
-    return "\n\n".join(kept).strip()
+    lines = text.splitlines(keepends=True)
+    kept: list[str] = []
+    fence: str | None = None
+    skip_blank = False
+    for index, line in enumerate(lines):
+        if skip_blank:
+            skip_blank = False
+            continue
+        stripped_line = line.rstrip("\n")
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", stripped_line)
+        if fence is None and marker:
+            fence = marker.group(1)
+        elif fence is not None and re.fullmatch(
+            rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", stripped_line
+        ):
+            fence = None
+        elif (
+            fence is None
+            and EMPTY_MARKDOWN_HEADING_RE.fullmatch(stripped_line)
+            and (index == 0 or not lines[index - 1].strip())
+            and (index + 1 == len(lines) or not lines[index + 1].strip())
+        ):
+            skip_blank = index > 0 and index + 1 < len(lines)
+            continue
+        kept.append(line)
+    return "".join(kept)
 
 
 def load_html_pagination_rules() -> str:
@@ -346,14 +380,15 @@ def load_html_pagination_rules() -> str:
 
 
 def _clean_page_body(text: str) -> str:
-    normalized = _normalize_newlines(text or "").strip()
+    normalized = _normalize_newlines(text or "")
+    normalized = re.sub(r"\A(?:[ \t]*\n)+|(?:\n[ \t]*)+\Z", "", normalized)
     if HTML_TAG_RE.search(normalized):
         raise RuntimeError(
             "Canonical Markdown must not contain raw HTML tags; use markdown-rendered teaching text"
         )
     normalized = _strip_empty_heading_blocks(normalized)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    return normalized.strip()
+    normalized = re.sub(r"\A(?:[ \t]*\n)+|(?:\n[ \t]*)+\Z", "", normalized)
+    return normalized if normalized.strip() else ""
 
 
 def _remove_image_links(text: str) -> str:
@@ -405,7 +440,7 @@ def _remove_duplicate_cover_heading(pages: list[str], *, title: str) -> list[str
         return pages
 
     remaining_lines = pages[0].splitlines()[1:]
-    remaining_body = "\n".join(remaining_lines).strip()
+    remaining_body = _clean_page_body("\n".join(remaining_lines))
     remaining_pages = pages[1:]
     if remaining_body:
         return [remaining_body, *remaining_pages]
@@ -430,7 +465,7 @@ def _remove_adjacent_duplicate_headings(pages: list[str]) -> list[str]:
     for page in pages:
         title = _heading_text(page)
         if title and title == previous_title:
-            page = "\n".join(page.splitlines()[1:]).strip()
+            page = _clean_page_body("\n".join(page.splitlines()[1:]))
         previous_title = title
         if page:
             result.append(page)
@@ -456,7 +491,7 @@ def _chunk_units(units: list[str], chunk_count: int) -> list[str]:
         remaining_units = total_units - start
         size = math.ceil(remaining_units / remaining_chunks)
         chunk_units = units[start : start + size]
-        chunks.append("\n\n".join(chunk_units).strip())
+        chunks.append("\n\n".join(chunk_units).strip("\n"))
         start += size
     return [chunk for chunk in chunks if chunk]
 
@@ -468,7 +503,7 @@ def _collapse_units_to_page_limit(
     preserve_summary_page: bool,
 ) -> list[str]:
     if len(units) <= max_pages:
-        return [unit.strip() for unit in units if unit.strip()]
+        return [unit for unit in units if unit.strip()]
 
     keep_summary = preserve_summary_page and bool(units) and _is_summary_block(units[-1])
     main_units = units[:-1] if keep_summary else units
@@ -478,7 +513,7 @@ def _collapse_units_to_page_limit(
 
     pages = _chunk_units(main_units, page_slots)
     if keep_summary:
-        pages.append(units[-1].strip())
+        pages.append(units[-1])
     return [page for page in pages if page]
 
 
@@ -494,7 +529,9 @@ def _load_html_pagination_assets() -> tuple[str, str, dict[str, Any]]:
     return system_prompt, user_prompt, schema
 
 
-def prepare_html_pagination_request(text: str) -> tuple[str, str, str]:
+def prepare_html_pagination_request(text: str) -> HtmlPaginationRequest:
+    model = HTML_PAGINATION_MODEL
+    reasoning_effort = HTML_PAGINATION_REASONING_EFFORT
     system_prompt, template, schema = _load_html_pagination_assets()
     normalized = _clean_page_body(text)
     if not normalized:
@@ -510,13 +547,20 @@ def prepare_html_pagination_request(text: str) -> tuple[str, str, str]:
     ]
     request_hash = hashlib.sha256(
         json.dumps(
-            [HTML_PAGINATION_MODEL, HTML_PAGINATION_REASONING_EFFORT,
-             system_prompt, prompt, schema, provider_identity],
+            [model, reasoning_effort, system_prompt, prompt, schema, provider_identity],
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    return system_prompt, prompt, request_hash
+    return HtmlPaginationRequest(
+        system_prompt=system_prompt,
+        prompt=prompt,
+        schema=schema,
+        provider=provider,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        request_hash=request_hash,
+    )
 
 
 def _extract_json_payload(raw_output: str) -> str:
@@ -533,7 +577,7 @@ def _validate_html_pagination_model_output(payload: Any) -> dict[str, Any]:
         raise RuntimeError("html pagination model must return an object with a 'pages' list")
     if not payload["pages"]:
         raise RuntimeError("html pagination model must return at least one page")
-    for index, page in enumerate(payload["pages"]):
+    for index, page in enumerate(payload["pages"][:HTML_PAGINATION_MAX_PAGES]):
         if (
             not isinstance(page, dict)
             or not isinstance(page.get("marp_code"), str)
@@ -609,9 +653,12 @@ def _load_codex_html_pagination_config(*, require_api_key: bool = True) -> Codex
     )
 
 
-def _run_html_pagination_model(prompt: str) -> dict[str, Any]:
-    system_prompt, _template, schema = _load_html_pagination_assets()
-    provider_config = _load_codex_html_pagination_config()
+def _run_html_pagination_model(request: HtmlPaginationRequest) -> dict[str, Any]:
+    provider_config = request.provider
+    if not provider_config.api_key:
+        raise RuntimeError(
+            f"active Codex model provider requires environment variable {provider_config.env_key}"
+        )
     default_headers = (
         {provider_config.auth_header_name: provider_config.api_key}
         if provider_config.auth_header_name
@@ -630,27 +677,27 @@ def _run_html_pagination_model(prompt: str) -> dict[str, Any]:
         ) as client:
             if provider_config.wire_api == "responses":
                 response = client.responses.create(
-                    model=HTML_PAGINATION_MODEL,
+                    model=request.model,
                     input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
+                        {"role": "system", "content": request.system_prompt},
+                        {"role": "user", "content": request.prompt},
                     ],
-                    reasoning={"effort": HTML_PAGINATION_REASONING_EFFORT},
+                    reasoning={"effort": request.reasoning_effort},
                     text={"format": {
-                        "type": "json_schema", "name": "marp_output", "schema": schema, "strict": True,
+                        "type": "json_schema", "name": "marp_output", "schema": request.schema, "strict": True,
                     }},
                 )
                 raw_output = getattr(response, "output_text", None)
             else:
                 response = client.chat.completions.create(
-                    model=HTML_PAGINATION_MODEL,
+                    model=request.model,
                     messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
+                        {"role": "system", "content": request.system_prompt},
+                        {"role": "user", "content": request.prompt},
                     ],
-                    reasoning_effort=HTML_PAGINATION_REASONING_EFFORT,
+                    reasoning_effort=request.reasoning_effort,
                     response_format={"type": "json_schema", "json_schema": {
-                        "name": "marp_output", "schema": schema, "strict": True,
+                        "name": "marp_output", "schema": request.schema, "strict": True,
                     }},
                 )
                 choices = getattr(response, "choices", None)
@@ -661,8 +708,8 @@ def _run_html_pagination_model(prompt: str) -> dict[str, Any]:
                 )
     except Exception as exc:
         raise RuntimeError(
-            f"html pagination {HTML_PAGINATION_MODEL} reasoning effort "
-            f"{HTML_PAGINATION_REASONING_EFFORT} request failed ({type(exc).__name__}); "
+            f"html pagination {request.model} reasoning effort "
+            f"{request.reasoning_effort} request failed ({type(exc).__name__}); "
             "model or reasoning support could not be confirmed"
         ) from None
 
@@ -677,17 +724,17 @@ def _run_html_pagination_model(prompt: str) -> dict[str, Any]:
             raise RuntimeError("html pagination chat response was incomplete")
 
     returned_model = getattr(response, "model", None)
-    if returned_model and returned_model != HTML_PAGINATION_MODEL:
-        raise RuntimeError(f"html pagination response model does not match {HTML_PAGINATION_MODEL}")
+    if returned_model and returned_model != request.model:
+        raise RuntimeError(f"html pagination response model does not match {request.model}")
     if not returned_model:
-        log_message(f"[stage-b] provider did not confirm response model {HTML_PAGINATION_MODEL}")
+        log_message(f"[stage-b] provider did not confirm response model {request.model}")
     returned_reasoning = getattr(getattr(response, "reasoning", None), "effort", None)
-    if returned_reasoning and returned_reasoning != HTML_PAGINATION_REASONING_EFFORT:
+    if returned_reasoning and returned_reasoning != request.reasoning_effort:
         raise RuntimeError(
-            f"html pagination response reasoning effort does not match {HTML_PAGINATION_REASONING_EFFORT}"
+            f"html pagination response reasoning effort does not match {request.reasoning_effort}"
         )
     if not returned_reasoning:
-        log_message(f"[stage-b] provider did not confirm reasoning effort {HTML_PAGINATION_REASONING_EFFORT}")
+        log_message(f"[stage-b] provider did not confirm reasoning effort {request.reasoning_effort}")
 
     if not isinstance(raw_output, str) or not raw_output.strip():
         status = getattr(response, "status", None)
@@ -711,13 +758,17 @@ def paginate_markdown_content(
     text: str,
     *,
     section_id: str | None = None,
+    cache_key: str | None = None,
     pagination_cache: HtmlPaginationCache | None = None,
     model_output_path: Path | None = None,
+    request: HtmlPaginationRequest | None = None,
 ) -> list[str]:
-    _system_prompt, prompt, request_hash = prepare_html_pagination_request(text)
+    request = request or prepare_html_pagination_request(text)
+    request_hash = request.request_hash
+    cache_identity = cache_key if cache_key is not None else section_id
     model_output = (
-        pagination_cache.get(section_id, request_hash)
-        if pagination_cache is not None and section_id is not None
+        pagination_cache.get(cache_identity, request_hash)
+        if pagination_cache is not None and cache_identity is not None
         else None
     )
     if model_output is not None:
@@ -725,9 +776,9 @@ def paginate_markdown_content(
     else:
         started_at = time.monotonic()
         if section_id:
-            log_message(f"[stage-b] section {section_id}: {HTML_PAGINATION_MODEL} request started")
+            log_message(f"[stage-b] section {section_id}: {request.model} request started")
         try:
-            model_output = _run_html_pagination_model(prompt)
+            model_output = _run_html_pagination_model(request)
             model_output = _validate_html_pagination_model_output(model_output)
         except Exception:
             if section_id:
@@ -739,8 +790,8 @@ def paginate_markdown_content(
     pages = _normalize_explicit_page_content(
         [page["content"] for page in model_output["pages"][:HTML_PAGINATION_MAX_PAGES]]
     )
-    if pagination_cache is not None and section_id is not None:
-        pagination_cache.store(section_id, request_hash, model_output)
+    if pagination_cache is not None and cache_identity is not None:
+        pagination_cache.store(cache_identity, request_hash, model_output)
     return pages
 
 
@@ -864,10 +915,11 @@ def _select_fira_blocks(
 
 
 def _select_fira_teaching_blocks(source_blocks: list[SectionSourceBlock]) -> list[SectionSourceBlock]:
-    return [
-        block for block in _select_fira_blocks(source_blocks, category="html")
-        if block.name.strip() != "本节要点"
+    teaching = [
+        block for block in source_blocks
+        if block.category == "html" and block.name.strip() == "文字讲解"
     ]
+    return _select_fira_blocks(teaching, category="html")
 
 
 def _extract_fira_section_content(
@@ -952,6 +1004,7 @@ def _select_html_source_text(section: Section) -> str:
         html_texts = [text for text in html_texts if text]
         if html_texts:
             return "\n\n".join(html_texts).strip()
+        raise RuntimeError(f"Section {section.id} has no usable teaching block")
     if section.content.strip():
         return _clean_page_body(section.content)
     raise RuntimeError(
@@ -968,6 +1021,7 @@ def materialize_section_markdown(
     write_artifact: bool = True,
     pagination_cache: HtmlPaginationCache | None = None,
     model_output_path: Path | None = None,
+    pagination_request: HtmlPaginationRequest | None = None,
 ) -> Path:
     block_type = _resolve_section_block_type(section, default_block_type=default_block_type)
     md_name = _resolve_section_md_name(section)
@@ -987,10 +1041,11 @@ def materialize_section_markdown(
         pages = paginate_markdown_content(
             _select_html_source_text(section),
             section_id=section.id,
+            cache_key=f"{section.order}:{section.id}",
             pagination_cache=pagination_cache,
+            request=pagination_request,
             model_output_path=model_output_path or (
-                output_dir / ".html-pagination-model"
-                / f"{hashlib.sha256(section.id.encode('utf-8')).hexdigest()[:16]}.json"
+                output_dir / ".html-pagination-model" / f"section-{section.order:04d}.model.json"
             ),
         )
 

@@ -180,7 +180,8 @@ class StageBMarkdownContractTest(unittest.TestCase):
             )
             original_manifest = manifest_path.read_bytes()
 
-            def fake_model(prompt: str) -> list[str]:
+            def fake_model(request: common.HtmlPaginationRequest) -> dict:
+                prompt = request.prompt
                 self.assertIn("源摘要仍保留", prompt)
                 return plugin_output([
                     "## 正文\n\n原始正文。",
@@ -505,7 +506,8 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 for i in range(1, 20)
             ] + ["## 本节要点\n\n总结内容。"]
 
-            def fake_model(prompt: str) -> dict:
+            def fake_model(request: common.HtmlPaginationRequest) -> dict:
+                prompt = request.prompt
                 self.assertIn("最多生成 20 页", prompt)
                 return plugin_output(model_pages)
 
@@ -670,7 +672,8 @@ class StageBMarkdownContractTest(unittest.TestCase):
     def test_html_pagination_uses_plugin_prompt_for_model_path(self) -> None:
         markdown = "## 标题\n\n第一页正文。"
 
-        def fake_model(prompt: str) -> dict:
+        def fake_model(request: common.HtmlPaginationRequest) -> dict:
+            prompt = request.prompt
             self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", markdown), prompt)
             return plugin_output([markdown])
 
