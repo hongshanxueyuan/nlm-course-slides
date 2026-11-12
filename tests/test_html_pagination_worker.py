@@ -17,9 +17,18 @@ if str(SCRIPTS_DIR) not in sys.path:
 import common  # noqa: E402
 import html_pagination_worker  # noqa: E402
 import list_course_sections  # noqa: E402
+from fake_codex import responses_api_payload, sdk_httpx, SdkDefaultHttpxClient, plugin_output, _write_fake_codex_home  # noqa: E402
 
 
 class HtmlPaginationWorkerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        fake_home = _write_fake_codex_home(Path(tempdir.name))
+        env_patch = patch.dict("os.environ", {"CODEX_HOME": str(fake_home), "AZURE_OPENAI_API_KEY": "fake-key"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
     def _write_manifest(self, root: Path) -> Path:
         manifest_path = root / "manifest.json"
         manifest_path.write_text(
@@ -47,6 +56,306 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
         )
         return manifest_path
 
+    def test_worker_preserves_plugin_pages_and_aggregates_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            workers = root / "workers"
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n',
+                encoding="utf-8",
+            )
+            raw = {"pages": [
+                {"marp_code": "## Short\n- A", "content": "## Generated page\n\nFull example and details."},
+                {"marp_code": "## Short\n- B", "content": "## 本节要点\n\nThis is part of the teaching text."},
+            ]}
+            requests = []
+            def send(request):
+                requests.append(json.loads(request.content.decode("utf-8")))
+                return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw, ensure_ascii=False)), request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                html_pagination_worker.run_job(manifest_path, workers, 1)
+                raw_path = workers / "section-0001.model.json"
+                self.assertEqual(raw, json.loads(raw_path.read_text(encoding="utf-8")))
+                manifest = common.load_course_manifest(manifest_path)
+                html_pagination_worker.apply_results(manifest, workers)
+                common.materialize_markdown_artifacts(manifest, output_dir=root / "output")
+            section = manifest.sections[0]
+            markdown = (root / "output" / section.md_name).read_text(encoding="utf-8")
+            self.assertEqual(["# HTML section", "## Generated page\n\nFull example and details.", "## 本节要点\n\nThis is part of the teaching text."], section.page_content)
+            self.assertEqual(section.page_content, common.parse_canonical_markdown_pages(markdown, section_title=section.title, output_stem=Path(section.md_name).stem))
+            self.assertEqual(raw, json.loads(raw_path.read_text(encoding="utf-8")))
+            self.assertEqual("gpt-6.1-terra", requests[0]["model"])
+            self.assertEqual(["system", "user"], [message["role"] for message in requests[0]["input"]])
+            self.assertIn("HTML section source.", requests[0]["input"][1]["content"])
+            self.assertEqual(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8"), requests[0]["input"][0]["content"])
+            self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", "## Teaching\n\nHTML section source."), requests[0]["input"][1]["content"])
+            self.assertEqual("max", requests[0]["reasoning"]["effort"])
+            self.assertEqual(json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8")), requests[0]["text"]["format"]["schema"])
+
+    def test_twenty_model_pages_are_cleaned_once_and_merged_without_losing_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            workers = root / "workers"
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+            contents = ["# HTML section\n\n## Same\n\n###\n\nFirst detail.", "## Same\n\nSecond detail."]
+            contents += [f"## Page {index}\n\nDetail {index}." for index in range(3, 21)]
+            contents += ["## Excess 21\n\nExcess twenty-one.", "## Excess 22\n\nExcess twenty-two."]
+            raw = {"pages": [{"marp_code": f"- slide {index}", "content": content} for index, content in enumerate(contents)]}
+            def send(request):
+                return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw, ensure_ascii=False)), request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                html_pagination_worker.run_job(manifest_path, workers, 1)
+                manifest = common.load_course_manifest(manifest_path)
+                html_pagination_worker.apply_results(manifest, workers)
+                common.materialize_markdown_artifacts(manifest, output_dir=root / "output")
+            section = manifest.sections[0]
+            markdown = (root / "output" / section.md_name).read_text(encoding="utf-8")
+            self.assertEqual(20, section.page_count)
+            self.assertEqual(section.page_content, common.parse_canonical_markdown_pages(markdown, section_title=section.title, output_stem=Path(section.md_name).stem))
+            self.assertEqual(raw, json.loads((workers / "section-0001.model.json").read_text(encoding="utf-8")))
+            self.assertEqual(1, markdown.count("## Same"))
+            self.assertNotIn("###\n", markdown)
+            self.assertNotIn("Excess twenty-one.", markdown)
+            self.assertNotIn("Excess twenty-two.", markdown)
+            for fragment in ["First detail.", "Second detail.", *[f"Detail {index}." for index in range(3, 21)]]:
+                self.assertEqual(1, markdown.count(fragment))
+
+    def test_separate_key_points_component_is_excluded_but_teaching_text_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = root / "course.json"
+            course = {"name": "课程", "chapters": [{"name": "第一章", "sections": [
+                {"name": "第一章"}, {"name": "1.1 测试", "verticals": [{"name": "正文", "blocks": [
+                    {"category": "html", "name": "文字讲解", "text": "<h2>本节要点</h2><p>教学中的内容。</p>"},
+                    {"category": "html", "name": "本节要点", "text": "<h2>本节要点</h2><p>独立摘要组件。</p>"},
+                ]}]}]}]}
+            manifest_path.write_text(json.dumps(course, ensure_ascii=False), encoding="utf-8")
+            original = manifest_path.read_bytes()
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+            requests = []
+            raw = {"pages": [{"marp_code": "- short", "content": "## 本节要点\n\n教学中的内容。"}]}
+            def send(request):
+                requests.append(json.loads(request.content.decode("utf-8")))
+                return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw, ensure_ascii=False)), request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                html_pagination_worker.run_job(manifest_path, root / "workers", 1)
+                manifest = common.load_course_manifest(manifest_path)
+                html_pagination_worker.apply_results(manifest, root / "workers")
+                common.materialize_markdown_artifacts(manifest, output_dir=root / "output")
+            prompt = requests[0]["input"][1]["content"]
+            self.assertIn("教学中的内容", prompt)
+            self.assertNotIn("独立摘要组件", prompt)
+            self.assertIn("## 本节要点\n\n教学中的内容。", manifest.sections[0].page_content)
+            self.assertEqual(original, manifest_path.read_bytes())
+
+    def test_worker_invalidates_cached_results_when_provider_or_prompt_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            workers = root / "workers"
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+            requests = []
+            raw = {"pages": [{"marp_code": "- short", "content": "## Body\n\nOriginal content."}]}
+            def send(request):
+                requests.append(str(request.url))
+                return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                self.assertEqual("complete", html_pagination_worker.run_job(manifest_path, workers, 1)["status"])
+                self.assertEqual("cached", html_pagination_worker.run_job(manifest_path, workers, 1)["status"])
+                config_path.write_text(config_path.read_text(encoding="utf-8").replace("provider.example.test", "new-provider.example.test"), encoding="utf-8")
+                self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
+                self.assertEqual("complete", html_pagination_worker.run_job(manifest_path, workers, 1)["status"])
+                with patch.object(common, "HTML_PAGINATION_REASONING_EFFORT", "high"):
+                    self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
+                changed_schema = root / "schema.json"
+                schema = json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8"))
+                schema["description"] = "updated output contract"
+                changed_schema.write_text(json.dumps(schema), encoding="utf-8")
+                with patch.object(common, "HTML_PAGINATION_SCHEMA_PATH", changed_schema):
+                    self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
+                changed_prompt = root / "system.txt"
+                changed_prompt.write_text(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8")
+                with patch.object(common, "HTML_PAGINATION_SYSTEM_PATH", changed_prompt):
+                    self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
+                    self.assertEqual("complete", html_pagination_worker.run_job(manifest_path, workers, 1)["status"])
+            self.assertEqual(3, len(requests))
+            self.assertIn("new-provider.example.test", requests[1])
+
+    def test_worker_restores_missing_raw_model_output_from_valid_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            workers = root / "workers"
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+            requests = []
+            raw = {"pages": [{"marp_code": "- short", "content": "## Body\n\nFull details."}]}
+            def send(request):
+                requests.append(1)
+                return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                html_pagination_worker.run_job(manifest_path, workers, 1)
+                raw_path = workers / "section-0001.model.json"
+                raw_path.unlink()
+                self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
+                self.assertEqual("complete", html_pagination_worker.run_job(manifest_path, workers, 1)["status"])
+                self.assertEqual(raw, json.loads(raw_path.read_text(encoding="utf-8")))
+            self.assertEqual(1, len(requests))
+
+    def test_invalid_model_content_is_not_reused_as_a_successful_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            workers = root / "workers"
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+            requests = []
+            def send(request):
+                requests.append(1)
+                content = "<p>Invalid raw HTML</p>" if len(requests) == 1 else "## Body\n\nValid text."
+                raw = {"pages": [{"marp_code": "- slide", "content": content}]}
+                return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                with self.assertRaisesRegex(RuntimeError, "raw HTML"):
+                    html_pagination_worker.run_job(manifest_path, workers, 1)
+                self.assertFalse((workers / "section-0001.result.json").exists())
+                self.assertEqual("complete", html_pagination_worker.run_job(manifest_path, workers, 1)["status"])
+            self.assertEqual(2, len(requests))
+
+    def test_chat_provider_receives_same_plugin_contract_and_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "chat"\n', encoding="utf-8")
+            requests = []
+            raw = {"pages": [{"marp_code": "## short", "content": "## Body\n\nFull detail."}]}
+            def send(request):
+                requests.append(json.loads(request.content.decode("utf-8")))
+                response = {"id": "chat-test", "object": "chat.completion", "created": 0,
+                            "model": "gpt-6.1-terra", "choices": [{"index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": json.dumps(raw)}}]}
+                return sdk_httpx.Response(200, json=response, request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                html_pagination_worker.run_job(manifest_path, root / "workers", 1)
+            body = requests[0]
+            self.assertEqual("gpt-6.1-terra", body["model"])
+            self.assertEqual("max", body["reasoning_effort"])
+            self.assertEqual(["system", "user"], [message["role"] for message in body["messages"]])
+            self.assertEqual(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8"), body["messages"][0]["content"])
+            self.assertEqual(json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8")), body["response_format"]["json_schema"]["schema"])
+
+    def test_worker_rejects_returned_model_or_reasoning_downgrades(self) -> None:
+        for returned_model, returned_effort in [("other-model", "max"), ("gpt-6.1-terra", "low")]:
+            with self.subTest(model=returned_model, effort=returned_effort), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                manifest_path = self._write_manifest(root)
+                codex_home = root / "codex"
+                codex_home.mkdir()
+                (codex_home / "config.toml").write_text(
+                    'model_provider = "example"\n[model_providers.example]\n'
+                    'base_url = "https://provider.example.test/v1"\n'
+                    'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+                raw = {"pages": [{"marp_code": "- slide", "content": "## Body\n\nFull detail."}]}
+                def send(request):
+                    payload = responses_api_payload(json.dumps(raw))
+                    payload["model"] = returned_model
+                    payload["reasoning"] = {"effort": returned_effort}
+                    return sdk_httpx.Response(200, json=payload, request=request)
+                def transport(**kwargs):
+                    return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+                with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                    with self.assertRaisesRegex(RuntimeError, "model|reasoning"):
+                        html_pagination_worker.run_job(manifest_path, root / "workers", 1)
+                self.assertFalse((root / "workers" / "section-0001.result.json").exists())
+
+    def test_worker_rejects_incomplete_response_even_when_it_has_page_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model_provider = "example"\n[model_providers.example]\n'
+                'base_url = "https://provider.example.test/v1"\n'
+                'env_key = "TEST_API_KEY"\nwire_api = "responses"\n', encoding="utf-8")
+            raw = {"pages": [{"marp_code": "- slide", "content": "## Body\n\nTruncated text."}]}
+            def send(request):
+                payload = responses_api_payload(json.dumps(raw))
+                payload["status"] = "incomplete"
+                payload["incomplete_details"] = {"reason": "max_output_tokens"}
+                return sdk_httpx.Response(200, json=payload, request=request)
+            def transport(**kwargs):
+                return SdkDefaultHttpxClient(transport=sdk_httpx.MockTransport(send), **kwargs)
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=transport):
+                with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                    html_pagination_worker.run_job(manifest_path, root / "workers", 1)
+            self.assertFalse((root / "workers" / "section-0001.result.json").exists())
+
+    def test_worker_records_provider_configuration_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manifest_path = self._write_manifest(root)
+            codex_home = root / "bad-codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text('model_provider = "missing"\n', encoding="utf-8")
+            workers = root / "workers"
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}):
+                with self.assertRaisesRegex(RuntimeError, "active Codex model provider"):
+                    html_pagination_worker.run_job(manifest_path, workers, 1)
+            self.assertFalse((workers / "section-0001.result.json").exists())
+            failure = json.loads((workers / "section-0001.failure.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", failure["status"])
+            self.assertEqual("1.1", failure["section_id"])
+
     def test_worker_plan_runs_one_section_and_aggregator_reuses_its_result(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -60,7 +369,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
 
             with patch(
                 "common._run_html_pagination_model",
-                return_value=["## Generated page\n\nGenerated section content."],
+                return_value=plugin_output(["## Generated page\n\nGenerated section content."]),
             ) as model_call:
                 result = html_pagination_worker.run_job(manifest_path, output_dir, 1)
             self.assertEqual("complete", result["status"])
@@ -90,7 +399,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             output_dir = root / "workers"
             with patch(
                 "common._run_html_pagination_model",
-                return_value=["## Generated page\n\nGenerated section content."],
+                return_value=plugin_output(["## Generated page\n\nGenerated section content."]),
             ):
                 html_pagination_worker.run_job(manifest_path, output_dir, 1)
 
@@ -131,7 +440,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             workers_dir = root / "workers"
             with patch(
                 "common._run_html_pagination_model",
-                return_value=["## Generated page\n\nGenerated section content."],
+                return_value=plugin_output(["## Generated page\n\nGenerated section content."]),
             ):
                 html_pagination_worker.run_job(manifest_path, workers_dir, 1)
 

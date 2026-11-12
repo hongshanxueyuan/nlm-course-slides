@@ -124,6 +124,10 @@ SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
+HTML_PAGINATION_REASONING_EFFORT = "max"
+HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
+HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
+HTML_PAGINATION_SCHEMA_PATH = PROMPTS_DIR / "html-pagination-schema.json"
 HTML_PAGINATION_REQUEST_TIMEOUT_SECONDS = 120.0
 HTML_PAGINATION_CACHE_FILENAME = ".html-pagination-cache.json"
 HTML_PAGINATION_FAILURE_REPORT_FILENAME = "section-list-failure.json"
@@ -148,6 +152,7 @@ class Section:
     page_content: list[str] | None = None
     page_count: int | None = None
     source_blocks: list[SectionSourceBlock] | None = None
+    model_pagination_result: bool = field(default=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -172,33 +177,32 @@ class HtmlPaginationCache:
         if not isinstance(payload, dict):
             return
         entries = payload.get("sections")
-        if payload.get("version") == 1 and isinstance(entries, dict):
+        if payload.get("version") == 2 and isinstance(entries, dict):
             self._entries = {
                 section_id: entry
                 for section_id, entry in entries.items()
                 if isinstance(section_id, str) and isinstance(entry, dict)
             }
 
-    def get(self, section_id: str, request_hash: str) -> list[str] | None:
+    def get(self, section_id: str, request_hash: str) -> dict[str, Any] | None:
         with self._lock:
             entry = self._entries.get(section_id)
             if not entry or entry.get("request_hash") != request_hash:
                 return None
-            pages = entry.get("pages")
-            if not isinstance(pages, list):
-                return None
+            payload = entry.get("model_output")
             try:
-                return _normalize_explicit_page_content(pages)
+                validated = _validate_html_pagination_model_output(payload)
+                _normalize_explicit_page_content(
+                    [page["content"] for page in validated["pages"][:HTML_PAGINATION_MAX_PAGES]]
+                )
+                return validated
             except RuntimeError:
                 return None
 
-    def store(self, section_id: str, request_hash: str, pages: list[str]) -> None:
+    def store(self, section_id: str, request_hash: str, payload: dict[str, Any]) -> None:
         with self._lock:
-            self._entries[section_id] = {
-                "request_hash": request_hash,
-                "pages": pages,
-            }
-            write_json(self.path, {"version": 1, "sections": self._entries})
+            self._entries[section_id] = {"request_hash": request_hash, "model_output": payload}
+            write_json(self.path, {"version": 2, "sections": self._entries})
 
 
 @dataclass
@@ -420,6 +424,19 @@ def _remove_duplicate_title_only_pages(pages: list[str], *, title: str) -> list[
     return filtered_pages
 
 
+def _remove_adjacent_duplicate_headings(pages: list[str]) -> list[str]:
+    result: list[str] = []
+    previous_title: str | None = None
+    for page in pages:
+        title = _heading_text(page)
+        if title and title == previous_title:
+            page = "\n".join(page.splitlines()[1:]).strip()
+        previous_title = title
+        if page:
+            result.append(page)
+    return result
+
+
 def _is_summary_block(block: str) -> bool:
     title = _heading_text(block)
     return bool(title and title in SUMMARY_HEADING_TEXTS)
@@ -465,37 +482,41 @@ def _collapse_units_to_page_limit(
     return [page for page in pages if page]
 
 
-def _requires_summary_tail_preservation(rules: str) -> bool:
-    return all(
-        fragment in rules
-        for fragment in (
-            "本节要点",
-            "总结",
-            "复盘",
-            "最后一页",
-        )
-    )
-
-
-def build_html_pagination_prompt(text: str, *, rules: str) -> str:
-    if "{text}" in rules:
-        return rules.replace("{text}", text)
-    return "\n\n".join([rules, text])
+def _load_html_pagination_assets() -> tuple[str, str, dict[str, Any]]:
+    try:
+        system_prompt = HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8")
+        user_prompt = HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8")
+        schema = json.loads(HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Could not load HTML pagination prompt or output contract") from exc
+    if not system_prompt.strip() or "{text}" not in user_prompt or not isinstance(schema, dict):
+        raise RuntimeError("Invalid HTML pagination prompt or output contract")
+    return system_prompt, user_prompt, schema
 
 
 def prepare_html_pagination_request(text: str) -> tuple[str, str, str]:
-    rules = load_html_pagination_rules()
+    system_prompt, template, schema = _load_html_pagination_assets()
     normalized = _clean_page_body(text)
     if not normalized:
         raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
-    prompt = build_html_pagination_prompt(normalized, rules=rules)
+    prompt = template.replace("{text}", normalized)
+    provider = _load_codex_html_pagination_config(require_api_key=False)
+    provider_identity = [
+        provider.provider_name,
+        provider.base_url,
+        provider.wire_api,
+        provider.env_key,
+        provider.auth_header_name,
+    ]
     request_hash = hashlib.sha256(
         json.dumps(
-            [HTML_PAGINATION_MODEL, prompt],
+            [HTML_PAGINATION_MODEL, HTML_PAGINATION_REASONING_EFFORT,
+             system_prompt, prompt, schema, provider_identity],
             ensure_ascii=False,
+            sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    return rules, prompt, request_hash
+    return system_prompt, prompt, request_hash
 
 
 def _extract_json_payload(raw_output: str) -> str:
@@ -507,7 +528,26 @@ def _extract_json_payload(raw_output: str) -> str:
     return stripped
 
 
-def _parse_html_pagination_model_output(raw_output: str) -> list[str]:
+def _validate_html_pagination_model_output(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("pages"), list):
+        raise RuntimeError("html pagination model must return an object with a 'pages' list")
+    if not payload["pages"]:
+        raise RuntimeError("html pagination model must return at least one page")
+    for index, page in enumerate(payload["pages"]):
+        if (
+            not isinstance(page, dict)
+            or not isinstance(page.get("marp_code"), str)
+            or not isinstance(page.get("content"), str)
+        ):
+            raise RuntimeError(
+                f"html pagination page {index + 1} must contain marp_code and content strings"
+            )
+        if not page["content"].strip():
+            raise RuntimeError(f"html pagination page {index + 1} content must not be empty")
+    return payload
+
+
+def _parse_html_pagination_model_output(raw_output: str) -> dict[str, Any]:
     payload_text = _extract_json_payload(raw_output)
     if not payload_text:
         raise RuntimeError("html pagination model returned empty output")
@@ -515,17 +555,10 @@ def _parse_html_pagination_model_output(raw_output: str) -> list[str]:
         payload = json.loads(payload_text)
     except json.JSONDecodeError as exc:
         raise RuntimeError("html pagination model must return valid JSON") from exc
-
-    if isinstance(payload, dict):
-        pages = payload.get("pages")
-    else:
-        pages = payload
-    if not isinstance(pages, list):
-        raise RuntimeError("html pagination model must return a JSON list or an object with a 'pages' list")
-    return _normalize_explicit_page_content(pages)
+    return _validate_html_pagination_model_output(payload)
 
 
-def _load_codex_html_pagination_config() -> CodexProviderConfig:
+def _load_codex_html_pagination_config(*, require_api_key: bool = True) -> CodexProviderConfig:
     configured_home = os.environ.get("CODEX_HOME", "").strip()
     codex_home = (
         Path(configured_home).expanduser()
@@ -557,7 +590,7 @@ def _load_codex_html_pagination_config() -> CodexProviderConfig:
     if not isinstance(env_key, str) or not env_key.strip():
         raise RuntimeError("active Codex model provider is missing env_key")
     api_key = os.environ.get(env_key)
-    if not isinstance(api_key, str) or not api_key.strip():
+    if require_api_key and (not isinstance(api_key, str) or not api_key.strip()):
         raise RuntimeError(
             f"active Codex model provider requires environment variable {env_key}"
         )
@@ -571,12 +604,13 @@ def _load_codex_html_pagination_config() -> CodexProviderConfig:
         base_url=base_url.strip(),
         wire_api=wire_api,
         env_key=env_key,
-        api_key=api_key.strip(),
+        api_key=api_key.strip() if isinstance(api_key, str) else "",
         auth_header_name=auth_header_name,
     )
 
 
-def _run_html_pagination_model(prompt: str) -> list[str]:
+def _run_html_pagination_model(prompt: str) -> dict[str, Any]:
+    system_prompt, _template, schema = _load_html_pagination_assets()
     provider_config = _load_codex_html_pagination_config()
     default_headers = (
         {provider_config.auth_header_name: provider_config.api_key}
@@ -597,13 +631,27 @@ def _run_html_pagination_model(prompt: str) -> list[str]:
             if provider_config.wire_api == "responses":
                 response = client.responses.create(
                     model=HTML_PAGINATION_MODEL,
-                    input=prompt,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    reasoning={"effort": HTML_PAGINATION_REASONING_EFFORT},
+                    text={"format": {
+                        "type": "json_schema", "name": "marp_output", "schema": schema, "strict": True,
+                    }},
                 )
                 raw_output = getattr(response, "output_text", None)
             else:
                 response = client.chat.completions.create(
                     model=HTML_PAGINATION_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    reasoning_effort=HTML_PAGINATION_REASONING_EFFORT,
+                    response_format={"type": "json_schema", "json_schema": {
+                        "name": "marp_output", "schema": schema, "strict": True,
+                    }},
                 )
                 choices = getattr(response, "choices", None)
                 raw_output = (
@@ -613,8 +661,33 @@ def _run_html_pagination_model(prompt: str) -> list[str]:
                 )
     except Exception as exc:
         raise RuntimeError(
-            f"html pagination {HTML_PAGINATION_MODEL} request failed ({type(exc).__name__})"
+            f"html pagination {HTML_PAGINATION_MODEL} reasoning effort "
+            f"{HTML_PAGINATION_REASONING_EFFORT} request failed ({type(exc).__name__}); "
+            "model or reasoning support could not be confirmed"
         ) from None
+
+    if provider_config.wire_api == "responses":
+        status = getattr(response, "status", None)
+        if status and status != "completed":
+            safe_status = status if status in {"incomplete", "failed", "cancelled"} else "other"
+            raise RuntimeError(f"html pagination response was not completed (status={safe_status})")
+    else:
+        finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+        if finish_reason in {"length", "content_filter"}:
+            raise RuntimeError("html pagination chat response was incomplete")
+
+    returned_model = getattr(response, "model", None)
+    if returned_model and returned_model != HTML_PAGINATION_MODEL:
+        raise RuntimeError(f"html pagination response model does not match {HTML_PAGINATION_MODEL}")
+    if not returned_model:
+        log_message(f"[stage-b] provider did not confirm response model {HTML_PAGINATION_MODEL}")
+    returned_reasoning = getattr(getattr(response, "reasoning", None), "effort", None)
+    if returned_reasoning and returned_reasoning != HTML_PAGINATION_REASONING_EFFORT:
+        raise RuntimeError(
+            f"html pagination response reasoning effort does not match {HTML_PAGINATION_REASONING_EFFORT}"
+        )
+    if not returned_reasoning:
+        log_message(f"[stage-b] provider did not confirm reasoning effort {HTML_PAGINATION_REASONING_EFFORT}")
 
     if not isinstance(raw_output, str) or not raw_output.strip():
         status = getattr(response, "status", None)
@@ -622,9 +695,11 @@ def _run_html_pagination_model(prompt: str) -> list[str]:
         incomplete_reason = getattr(incomplete_details, "reason", None)
         details = []
         if status:
-            details.append(f"status={status}")
+            safe_status = status if status in {"completed", "incomplete", "failed", "cancelled"} else "other"
+            details.append(f"status={safe_status}")
         if incomplete_reason:
-            details.append(f"reason={incomplete_reason}")
+            safe_reason = incomplete_reason if incomplete_reason in {"max_output_tokens", "content_filter"} else "other"
+            details.append(f"reason={safe_reason}")
         suffix = f" ({', '.join(details)})" if details else ""
         raise RuntimeError(
             f"html pagination GPT-6.1 Terra response did not contain text output{suffix}"
@@ -635,42 +710,37 @@ def _run_html_pagination_model(prompt: str) -> list[str]:
 def paginate_markdown_content(
     text: str,
     *,
-    omit_trailing_key_points_page: bool = False,
     section_id: str | None = None,
     pagination_cache: HtmlPaginationCache | None = None,
+    model_output_path: Path | None = None,
 ) -> list[str]:
-    rules, prompt, request_hash = prepare_html_pagination_request(text)
-    model_pages = (
+    _system_prompt, prompt, request_hash = prepare_html_pagination_request(text)
+    model_output = (
         pagination_cache.get(section_id, request_hash)
         if pagination_cache is not None and section_id is not None
         else None
     )
-    if model_pages is not None:
+    if model_output is not None:
         log_message(f"[stage-b] section {section_id}: reusing cached HTML pages")
     else:
         started_at = time.monotonic()
         if section_id:
-            log_message(
-                f"[stage-b] section {section_id}: {HTML_PAGINATION_MODEL} request started"
-            )
+            log_message(f"[stage-b] section {section_id}: {HTML_PAGINATION_MODEL} request started")
         try:
-            model_pages = _run_html_pagination_model(prompt)
+            model_output = _run_html_pagination_model(prompt)
+            model_output = _validate_html_pagination_model_output(model_output)
         except Exception:
             if section_id:
                 elapsed = time.monotonic() - started_at
-                log_message(
-                    f"[stage-b] section {section_id}: pagination failed after {elapsed:.1f}s"
-                )
+                log_message(f"[stage-b] section {section_id}: pagination failed after {elapsed:.1f}s")
             raise
-    if omit_trailing_key_points_page:
-        model_pages = _omit_trailing_key_points_page(model_pages)
-    pages = _collapse_units_to_page_limit(
-        model_pages,
-        max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
-        preserve_summary_page=_requires_summary_tail_preservation(rules),
+    if model_output_path is not None:
+        write_json(model_output_path, model_output)
+    pages = _normalize_explicit_page_content(
+        [page["content"] for page in model_output["pages"][:HTML_PAGINATION_MAX_PAGES]]
     )
-    if model_pages is not None and pagination_cache is not None and section_id is not None:
-        pagination_cache.store(section_id, request_hash, pages)
+    if pagination_cache is not None and section_id is not None:
+        pagination_cache.store(section_id, request_hash, model_output)
     return pages
 
 
@@ -793,6 +863,13 @@ def _select_fira_blocks(
     return [block for block in source_blocks if block.category == category]
 
 
+def _select_fira_teaching_blocks(source_blocks: list[SectionSourceBlock]) -> list[SectionSourceBlock]:
+    return [
+        block for block in _select_fira_blocks(source_blocks, category="html")
+        if block.name.strip() != "本节要点"
+    ]
+
+
 def _extract_fira_section_content(
     section_data: dict[str, Any],
     *,
@@ -804,7 +881,7 @@ def _extract_fira_section_content(
         if gallery_blocks:
             return gallery_blocks[0].text.strip(), source_blocks
 
-    html_blocks = _select_fira_blocks(source_blocks, category="html")
+    html_blocks = _select_fira_teaching_blocks(source_blocks)
     html_texts = [block.text.strip() for block in html_blocks if block.text.strip()]
     return "\n\n".join(html_texts).strip(), source_blocks
 
@@ -866,7 +943,7 @@ def _remove_backslashes(text: str) -> str:
 
 def _select_html_source_text(section: Section) -> str:
     if section.source_blocks:
-        html_blocks = _select_fira_blocks(section.source_blocks, category="html")
+        html_blocks = _select_fira_teaching_blocks(section.source_blocks)
         html_texts = [
             _clean_page_body(PAGE_MARKER_RE.sub("\n\n", _render_html(block.text)))
             for block in html_blocks
@@ -890,9 +967,11 @@ def materialize_section_markdown(
     include_cover: bool = False,
     write_artifact: bool = True,
     pagination_cache: HtmlPaginationCache | None = None,
+    model_output_path: Path | None = None,
 ) -> Path:
     block_type = _resolve_section_block_type(section, default_block_type=default_block_type)
     md_name = _resolve_section_md_name(section)
+    model_paginated = section.model_pagination_result
 
     if section.page_content is not None:
         pages = _normalize_explicit_page_content(section.page_content)
@@ -904,23 +983,29 @@ def materialize_section_markdown(
             allow_legacy_preface=True,
         )
     else:
+        model_paginated = True
         pages = paginate_markdown_content(
             _select_html_source_text(section),
-            omit_trailing_key_points_page=True,
             section_id=section.id,
             pagination_cache=pagination_cache,
+            model_output_path=model_output_path or (
+                output_dir / ".html-pagination-model"
+                / f"{hashlib.sha256(section.id.encode('utf-8')).hexdigest()[:16]}.json"
+            ),
         )
 
     if section.page_count is not None and section.page_count != len(pages):
         raise RuntimeError(
             f"page_count {section.page_count} does not match len(page_content) {len(pages)} for section {section.id}"
         )
-    if section.page_content is not None and block_type == "html":
+    if section.page_content is not None and block_type == "html" and not section.model_pagination_result:
         pages = _omit_trailing_key_points_page(pages)
     if include_cover:
         cover_title = strip_section_prefix(section.title)
         pages = _remove_duplicate_cover_heading(pages, title=cover_title)
         pages = _remove_duplicate_title_only_pages(pages, title=cover_title)
+        if model_paginated:
+            pages = _remove_adjacent_duplicate_headings(pages)
         pages = _collapse_units_to_page_limit(
             pages,
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
@@ -933,6 +1018,7 @@ def materialize_section_markdown(
             f"Final page list exceeded the 20-page contract for section {section.id}"
         )
 
+    pages = _normalize_explicit_page_content(pages)
     md_path = output_dir / md_name
     if write_artifact:
         write_text_atomically(md_path, serialize_canonical_markdown(pages))
@@ -1840,7 +1926,10 @@ def manifest_to_dict(manifest: CourseManifest) -> dict[str, Any]:
         "course_title": manifest.course_title,
         "source_path": manifest.source_path,
         "course_scene": manifest.course_scene,
-        "sections": [asdict(section) for section in manifest.sections],
+        "sections": [
+            {key: value for key, value in asdict(section).items() if key != "model_pagination_result"}
+            for section in manifest.sections
+        ],
     }
 
 

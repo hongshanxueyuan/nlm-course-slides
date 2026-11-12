@@ -188,7 +188,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
         self.assertLessEqual(requests[0]["timeout"]["read"], 120)
         self.assertEqual("gpt-6.1-terra", requests[0]["body"]["model"])
-        self.assertIn("Rendered course text.", requests[0]["body"]["input"])
+        self.assertIn("Rendered course text.", requests[0]["body"]["input"][1]["content"])
         self.assertEqual(
             ["# SDK boundary", "## Generated body\n\nSDK split output."],
             section["page_content"],
@@ -250,7 +250,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
 
             def fail_second_section(request: httpx.Request) -> httpx.Response:
                 request_payload = json.loads(request.content.decode("utf-8"))
-                prompt = request_payload["input"]
+                prompt = request_payload["input"][1]["content"]
                 first_run_requests.append(prompt)
                 if "SECOND PAGE" in prompt:
                     return httpx.Response(
@@ -292,7 +292,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
 
             def succeed_all_sections(request: httpx.Request) -> httpx.Response:
                 request_payload = json.loads(request.content.decode("utf-8"))
-                prompt = request_payload["input"]
+                prompt = request_payload["input"][1]["content"]
                 retry_requests.append(prompt)
                 page_text = "SECOND PAGE" if "SECOND PAGE" in prompt else "FIRST PAGE"
                 heading = "Second body" if "SECOND PAGE" in prompt else "First body"
