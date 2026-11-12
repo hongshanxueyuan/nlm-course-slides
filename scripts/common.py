@@ -425,6 +425,21 @@ def _normalize_explicit_page_content(page_content: list[str]) -> list[str]:
     return pages
 
 
+def _remove_duplicate_cover_heading(pages: list[str], *, title: str) -> list[str]:
+    if not pages:
+        return pages
+
+    first_line = pages[0].splitlines()[0]
+    match = re.match(r"^#{1,6}\s+(.+)$", first_line)
+    if not match or match.group(1).strip() != title:
+        return pages
+
+    remaining_body = _clean_page_body("\n".join(pages[0].splitlines()[1:]))
+    if remaining_body:
+        return [remaining_body, *pages[1:]]
+    return pages[1:]
+
+
 def _chunk_units(units: list[str], chunk_count: int) -> list[str]:
     chunks: list[str] = []
     start = 0
@@ -996,6 +1011,7 @@ def materialize_section_markdown(
         )
     if include_cover:
         cover_title = strip_section_prefix(section.title)
+        pages = _remove_duplicate_cover_heading(pages, title=cover_title)
         pages = _collapse_units_to_page_limit(
             pages,
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,

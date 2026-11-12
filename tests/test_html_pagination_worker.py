@@ -135,11 +135,12 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 common.materialize_markdown_artifacts(manifest, output_dir=root / "output")
             section = manifest.sections[0]
             markdown = (root / "output" / section.md_name).read_text(encoding="utf-8")
-            self.assertEqual(20, section.page_count)
+            self.assertEqual(19, section.page_count)
             self.assertEqual(section.page_content, common.parse_canonical_markdown_pages(markdown, section_title=section.title, output_stem=Path(section.md_name).stem))
             self.assertEqual(raw, json.loads((workers / "section-0001.model.json").read_text(encoding="utf-8")))
             self.assertEqual(2, markdown.count("## Same"))
-            self.assertIn("# HTML section", section.page_content)
+            self.assertEqual("# HTML section", section.page_content[0])
+            self.assertNotIn("# HTML section", section.page_content[1:])
             for fragment in ["First detail.", "Second detail.", *[f"Detail {index}." for index in range(3, 19)]]:
                 self.assertEqual(1, markdown.count(fragment))
 
@@ -437,7 +438,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
                 self.assertEqual(0, list_course_sections.main())
             report = json.loads((output / "section-list.json").read_text(encoding="utf-8"))
-            expected = ["    - Parent\n\n        - Child  ", "## Gallery\n\nFinal line  "]
+            expected = ["    - Parent\n\n        - Child  ", "Final line  "]
             for section, expected_page in zip(report["sections"], expected):
                 markdown = (output / section["md_name"]).read_text(encoding="utf-8")
                 self.assertEqual(expected_page, section["page_content"][-1])
