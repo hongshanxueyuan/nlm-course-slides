@@ -18,7 +18,18 @@ sdk_httpx = importlib.import_module(
 )
 
 
+def plugin_output(pages: list[str]) -> dict:
+    return {"pages": [{"marp_code": "- shortened", "content": page} for page in pages]}
+
+
 def responses_api_payload(output_text: str) -> dict:
+    try:
+        parsed = json.loads(output_text)
+    except (ValueError, TypeError):
+        pass
+    else:
+        if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list) and all(isinstance(page, str) for page in parsed["pages"]):
+            output_text = json.dumps(plugin_output(parsed["pages"]), ensure_ascii=False)
     return {
         "id": "resp_test",
         "object": "response",
@@ -46,9 +57,9 @@ def responses_api_payload(output_text: str) -> dict:
 def _fake_sdk_http_client(**kwargs):
     def send(request):
         request_payload = json.loads(request.content.decode("utf-8"))
-        prompt = request_payload.get("input", "")
+        prompt = request_payload["input"][1]["content"]
         match = re.search(
-            r"## 文档内容\s*```markdown\s*(.*?)\s*```\s*\n\s*## 输出格式",
+            r"## 文档内容\s*```\s*(.*?)\s*```\s*\n\s*## 输出格式",
             prompt,
             flags=re.DOTALL,
         )

@@ -36,7 +36,7 @@ description: Run a staged, human-confirmed NotebookLM course-slides workflow fro
 - 阶段 A 必须调用 `insights_mcp_server` 的 `get_runtime_course_content` 获取课程内容；调用时使用明确且有效的 `tenant` 和 `course_id`。将工具返回的完整 JSON 直接交给本地落盘脚本；工具不可用或调用失败时停止，不改用其他 MCP、签名 URL 或本地文件来源。
 - 课程结构解析继续沿用现有 manifest/FIRA 解析逻辑与 skip 规则；只有叶子 section 会进入后续阶段。
 - 阶段 B 会对 HTML 组件的 `text` 做 HTML 清理并转换为 Markdown，再执行现有分页流程。
-- 阶段 B 里如果 section 走 `html` 路线，分页前读取独立规则文件 [references/html-pagination-rules.md](references/html-pagination-rules.md)；它与发给 NotebookLM 的场景 `.txt` prompt 属于不同处理步骤，分别维护。
+- 阶段 B 的 HTML 分页 worker 加载 `prompts/html-pagination-system.txt`、`prompts/html-pagination-user.txt` 和 `prompts/html-pagination-schema.json`，与阶段 D 的 NotebookLM 场景提示词分开维护。
 - 如果 manifest 结构不明确，读取 [references/manifest-format.md](references/manifest-format.md)。
 - 如果需要本地下载后处理，默认使用 skill 自带的 `assets/logo.png`；如果用户需要换图标，在阶段 F 传 `--postprocess-image-path <absolute-path>`。
 
@@ -72,12 +72,12 @@ python3 scripts/prepare_course_json.py --json-stdin
 补充说明：
 
 - 对 `imagesgallery` 路线，阶段 B 先移除组件 `text` 中的所有反斜杠，再规范化已有分页文本。
-- 对需要模型分页的 `html` section，每节固定使用 Codex 模型 `gpt-6.1-terra`，先由独立 Codex 子 agent 处理，再汇总写入 `section-list.json` 和对应 `.md` 文件。分页前读取 [references/html-pagination-rules.md](references/html-pagination-rules.md)；该规则文件与发给 NotebookLM 的课程场景 `.txt` prompt 分开维护。
+- 对需要模型分页的 `html` section，先通过 worker 调用 OpenAI SDK，使用当前 Codex 提供商配置、`gpt-6.1-terra` 和 `max` 推理强度；不支持时报告失败。每节保留模型双字段分页 JSON，再由 `content` 形成最终页面清单，汇总写入 `section-list.json` 和对应 `.md` 文件。
 - 每个子 agent 只处理一个 `section_index`，运行分页 worker 并返回结果路径；分页内容留在结果文件中。
-- 对 `block_type=html` 的小节，阶段 B 会从最终页面列表中省略末尾独立标题为“本节要点”的页面；不会把摘要内容并入前一页，也不会改写源课程。该规则不影响 `imagesgallery`、末页标题为“总结”或“复盘”的页面，以及正文中提及“本节要点”的页面。
+- 文字讲解组件是 HTML 分页来源；独立的“本节要点”组件不进入分页。文字讲解正文中的“本节要点”标题和内容保留，源课程不变。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
 - 加入封面后，Stage B 会检查其后的每一页：页面去掉首尾空白后若只有一行 Markdown 标题（`#` 到 `######`），且标题文本与封面标题完全相同，就删除这张重复标题页；标题级别不影响匹配。保留含有正文或其他内容的同名标题页。随后从去重后的同一页面列表生成 canonical Markdown 和 `section-list.json`，并重算 `page_count` 与页标记。
-- HTML 小节移除上述摘要页后，正文分页结果最多 19 页；封面由程序随后插入，最终页面列表最多 20 页。超限时只合并相邻正文页，封面不参与合并。
+- 插件分页最多 20 页；封面随后插入，最终页面列表最多 20 页。正文页超限时只合并相邻正文页，封面不参与合并；模型分页 JSON 不被改写。相邻正文页完全相同的标题只保留一次，其正文保留。
 - 最终页面列表同时生成 canonical Markdown 和 `section-list.json`；`page_count` 必须等于 `page_content` 条数及 Markdown 页标记数。下游 `ppt-to-imagesgallery` 继续按 `page_count`、`page_content` 和真实 PPT 页数匹配处理。
 
 命令：
@@ -105,7 +105,7 @@ python3 scripts/html_pagination_worker.py /path/to/course.json --list-jobs
      --pagination-results-dir /path/to/.html-pagination-workers
    ```
 
-   `html_pagination_worker.py --list-jobs` 输出的 `output_dir` 是上述目录。worker 结果按课程 JSON 摘要、分页模型和分页请求校验；输入变化后的旧结果会被拒绝。失败时保留其他成功结果，只重跑失败或缺失的 section。任一 worker 失败时不要运行聚合命令，也不要进入阶段 C。保持与阶段 A 相同的工作目录，让默认课程输出目录继续使用阶段 A 创建的课程目录。
+   `html_pagination_worker.py --list-jobs` 输出的 `output_dir` 是上述目录。worker 结果按课程 JSON 摘要、模型、提供商协议、提示词、输出契约和推理配置校验；输入变化后的旧结果会被拒绝。失败时保留其他成功结果，只重跑失败或缺失的 section。任一 worker 失败时不要运行聚合命令，也不要进入阶段 C。保持与阶段 A 相同的工作目录，让默认课程输出目录继续使用阶段 A 创建的课程目录。
 
 只有当计划中的 `total_jobs` 为 `0` 时，才跳过 worker 并直接运行 `list_course_sections.py`。如果所有任务都是 `cached`，仍用 `--pagination-results-dir` 聚合这些结果，不要重新发起模型请求。
 
@@ -113,6 +113,7 @@ python3 scripts/html_pagination_worker.py /path/to/course.json --list-jobs
 
 - `section-list.json`
 - 每个 section 对应的 `.md` 文件
+- worker 目录中的 `section-NNNN.model.json`：每节模型原始分页 JSON，包含 `marp_code` 和 `content`，不含封面及后处理。直接运行聚合入口时保存在输出目录 `.html-pagination-model/` 下。
 
 向用户汇报时至少展示：
 
@@ -358,7 +359,6 @@ python3 scripts/summarize_course_slide_status.py \
 ## References
 
 - [references/manifest-format.md](references/manifest-format.md)
-- [references/html-pagination-rules.md](references/html-pagination-rules.md)
 - [prompts/企业流程与智能化场景.txt](prompts/企业流程与智能化场景.txt)
 - [prompts/企业出海场景.txt](prompts/企业出海场景.txt)
 

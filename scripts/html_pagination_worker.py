@@ -57,6 +57,10 @@ def _cache_path(output_dir: Path, section_index: int) -> Path:
     return output_dir / f"section-{section_index:04d}.cache.json"
 
 
+def _model_output_path(output_dir: Path, section_index: int) -> Path:
+    return output_dir / f"section-{section_index:04d}.model.json"
+
+
 def _failure_path(output_dir: Path, section_index: int) -> Path:
     return output_dir / f"section-{section_index:04d}.failure.json"
 
@@ -89,7 +93,7 @@ def _validated_pages(
 ) -> list[str] | None:
     if not payload or any(
         (
-            payload.get("version") != 1,
+            payload.get("version") != 2,
             payload.get("manifest_sha256") != manifest_hash,
             payload.get("model") != HTML_PAGINATION_MODEL,
             payload.get("request_hash") != request_hash,
@@ -123,6 +127,14 @@ def _load_valid_pages(
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
+        return None
+    try:
+        model_hash = hashlib.sha256(
+            _model_output_path(path.parent, section_index).read_bytes()
+        ).hexdigest()
+    except OSError:
+        return None
+    if payload.get("model_output_sha256") != model_hash:
         return None
     return _validated_pages(
         payload,
@@ -177,26 +189,26 @@ def run_job(manifest_path: Path, output_dir: Path, section_index: int) -> dict[s
 
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_hash = _manifest_hash(manifest)
-    request_hash = _request_hash(section)
     result_path = _result_path(output_dir, section_index)
     failure_path = _failure_path(output_dir, section_index)
-    cached_pages = _load_valid_pages(
-        result_path,
-        manifest_hash=manifest_hash,
-        section_index=section_index,
-        section=section,
-        request_hash=request_hash,
-    )
-    if cached_pages is not None:
-        failure_path.unlink(missing_ok=True)
-        return {
-            "status": "cached",
-            "section_index": section_index,
-            "section_id": section.id,
-            "result_path": str(result_path),
-        }
-
     try:
+        request_hash = _request_hash(section)
+        cached_pages = _load_valid_pages(
+            result_path,
+            manifest_hash=manifest_hash,
+            section_index=section_index,
+            section=section,
+            request_hash=request_hash,
+        )
+        if cached_pages is not None:
+            failure_path.unlink(missing_ok=True)
+            return {
+                "status": "cached",
+                "section_index": section_index,
+                "section_id": section.id,
+                "result_path": str(result_path),
+            }
+
         materialize_section_markdown(
             section,
             output_dir=output_dir,
@@ -204,13 +216,17 @@ def run_job(manifest_path: Path, output_dir: Path, section_index: int) -> dict[s
             include_cover=False,
             write_artifact=False,
             pagination_cache=HtmlPaginationCache(_cache_path(output_dir, section_index)),
+            model_output_path=_model_output_path(output_dir, section_index),
         )
         if section.page_content is None or section.page_count is None:
             raise RuntimeError(f"Section {section.id} did not produce paginated pages")
         write_json(
             result_path,
             {
-                "version": 1,
+                "version": 2,
+                "model_output_sha256": hashlib.sha256(
+                    _model_output_path(output_dir, section_index).read_bytes()
+                ).hexdigest(),
                 "manifest_sha256": manifest_hash,
                 "model": HTML_PAGINATION_MODEL,
                 "request_hash": request_hash,
@@ -264,6 +280,7 @@ def apply_results(manifest: CourseManifest, output_dir: Path) -> None:
             )
         section.page_content = pages
         section.page_count = len(pages)
+        section.model_pagination_result = True
 
 
 def main() -> int:

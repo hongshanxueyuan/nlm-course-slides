@@ -19,7 +19,7 @@ if str(TESTS_DIR) not in sys.path:
 import common  # noqa: E402
 import list_course_sections  # noqa: E402
 import upload_course_sections  # noqa: E402
-from fake_codex import run_stage_b_command  # noqa: E402
+from fake_codex import run_stage_b_command, plugin_output, _write_fake_codex_home  # noqa: E402
 
 
 MIXED_IMAGESGALLERY_MANIFEST = Path(
@@ -72,6 +72,14 @@ def create_pure_html_manifest(test_case: unittest.TestCase) -> Path:
 
 
 class StageBMarkdownContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        fake_home = _write_fake_codex_home(Path(tempdir.name))
+        env_patch = patch.dict("os.environ", {"CODEX_HOME": str(fake_home), "AZURE_OPENAI_API_KEY": "fake-key"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
     def _run_stage_b(self, manifest_path: Path) -> tuple[dict, Path]:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -132,7 +140,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual(section["page_count"], len(section["page_content"]))
         self.assertLessEqual(section["page_count"], 20)
         self.assertTrue(section["page_content"][0].startswith("# 博弈规则——【法国】合规宽严度与生存策略"))
-        self.assertFalse(
+        self.assertTrue(
             any(page.splitlines()[0].lstrip("# ") == "本节要点" for page in section["page_content"])
         )
         for page in section["page_content"]:
@@ -148,7 +156,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertNotIn("<p>", md_body)
         self.assertNotIn("<h2>", md_body)
 
-    def test_stage_b_omits_trailing_html_key_points_page_from_all_outputs(self) -> None:
+    def test_stage_b_preserves_teaching_text_key_points_in_all_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest_path = root / "manifest.json"
@@ -174,10 +182,10 @@ class StageBMarkdownContractTest(unittest.TestCase):
 
             def fake_model(prompt: str) -> list[str]:
                 self.assertIn("源摘要仍保留", prompt)
-                return [
+                return plugin_output([
                     "## 正文\n\n原始正文。",
                     "## 本节要点\n\n源摘要仍保留。",
-                ]
+                ])
 
             with patch("common._run_html_pagination_model", side_effect=fake_model):
                 payload, output_dir = self._run_stage_b(manifest_path)
@@ -186,10 +194,10 @@ class StageBMarkdownContractTest(unittest.TestCase):
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
             self.assertEqual(
-                ["# 示例章节", "## 正文\n\n原始正文。"],
+                ["# 示例章节", "## 正文\n\n原始正文。", "## 本节要点\n\n源摘要仍保留。"],
                 section["page_content"],
             )
-            self.assertEqual(2, section["page_count"])
+            self.assertEqual(3, section["page_count"])
             self.assertEqual(section["page_count"], len(section["page_content"]))
             self._assert_marker_alignment(md_body, section["page_count"])
             self.assertEqual(
@@ -200,8 +208,8 @@ class StageBMarkdownContractTest(unittest.TestCase):
                     output_stem=Path(section["md_name"]).stem,
                 ),
             )
-            self.assertNotIn("本节要点", md_body)
-            self.assertNotIn("源摘要仍保留", md_body)
+            self.assertIn("本节要点", md_body)
+            self.assertIn("源摘要仍保留", md_body)
             self.assertEqual(original_manifest, manifest_path.read_bytes())
             self.assertIn("源摘要仍保留", manifest_path.read_text(encoding="utf-8"))
 
@@ -233,7 +241,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-                with patch("common._run_html_pagination_model", return_value=pages):
+                with patch("common._run_html_pagination_model", return_value=plugin_output(pages)):
                     payload, _output_dir = self._run_stage_b(manifest_path)
 
                 section = payload["sections"][0]
@@ -276,7 +284,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
             self.assertNotIn("摘要。", md_body)
             self._assert_marker_alignment(md_body, 2)
 
-    def test_stage_b_omits_only_html_summary_page_but_keeps_cover(self) -> None:
+    def test_stage_b_preserves_only_teaching_key_points_and_adds_cover(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest_path = root / "manifest.json"
@@ -301,17 +309,17 @@ class StageBMarkdownContractTest(unittest.TestCase):
 
             with patch(
                 "common._run_html_pagination_model",
-                return_value=["## 本节要点\n\n摘要。"],
+                return_value=plugin_output(["## 本节要点\n\n摘要。"]),
             ):
                 payload, output_dir = self._run_stage_b(manifest_path)
 
             section = payload["sections"][0]
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
-            self.assertEqual(["# 仅有摘要"], section["page_content"])
-            self.assertEqual(1, section["page_count"])
-            self.assertNotIn("本节要点", md_body)
-            self._assert_marker_alignment(md_body, 1)
+            self.assertEqual(["# 仅有摘要", "## 本节要点\n\n摘要。"], section["page_content"])
+            self.assertEqual(2, section["page_count"])
+            self.assertIn("本节要点", md_body)
+            self._assert_marker_alignment(md_body, 2)
 
     def test_stage_b_prepends_semantic_title_cover_for_both_scenes(self) -> None:
         for scene in (common.COURSE_SCENE_STANDARD, common.COURSE_SCENE_OVERSEAS):
@@ -469,7 +477,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
         self._assert_marker_alignment(md_body, 20)
 
-    def test_stage_b_omits_html_summary_before_applying_cover_page_limit(self) -> None:
+    def test_stage_b_preserves_teaching_key_points_with_cover_page_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest_path = root / "manifest.json"
@@ -497,13 +505,9 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 for i in range(1, 20)
             ] + ["## 本节要点\n\n总结内容。"]
 
-            def fake_model(prompt: str) -> list[str]:
-                self.assertIn("正文分页结果**不得超过 19 页**", prompt)
-                self.assertNotIn("封面与正文总数", prompt)
-                self.assertNotIn("封面不参与合并", prompt)
-                self.assertNotIn("Stage B", prompt)
-                self.assertNotIn("阶段 B", prompt)
-                return model_pages
+            def fake_model(prompt: str) -> dict:
+                self.assertIn("最多生成 20 页", prompt)
+                return plugin_output(model_pages)
 
             argv = [
                 "list_course_sections.py",
@@ -527,11 +531,8 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual("# 出海章节", section["page_content"][0])
         self.assertEqual(20, section["page_count"])
         self.assertEqual(20, len(section["page_content"]))
-        self.assertEqual("## 正文1\n\n第1页内容。", section["page_content"][1])
-        self.assertEqual("## 正文19\n\n第19页内容。", section["page_content"][-1])
-        self.assertFalse(
-            any(page.splitlines()[0].lstrip("# ") == "本节要点" for page in section["page_content"])
-        )
+        self.assertIn("第1页内容。", section["page_content"][1])
+        self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
         self._assert_marker_alignment(md_body, 20)
 
     def test_stage_b_rejects_mismatched_explicit_md_name(self) -> None:
@@ -666,38 +667,23 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 output_stem="1.1 测试小节",
             )
 
-    def test_html_pagination_uses_rules_prompt_for_model_path(self) -> None:
+    def test_html_pagination_uses_plugin_prompt_for_model_path(self) -> None:
         markdown = "## 标题\n\n第一页正文。"
 
-        def fake_model(prompt: str) -> list[str]:
-            self.assertIn("## 任务描述", prompt)
-            self.assertIn("不要根据文件名、`output_name`、`md_name` 或 section 标题再额外生成一个包裹性的文档总标题。", prompt)
-            self.assertIn("不生成开头页、结尾页、文件名页或额外封面页，避免冗余内容。", prompt)
-            self.assertIn("正文分页结果**不得超过 19 页**", prompt)
-            self.assertNotIn("{max_body_pages}", prompt)
-            self.assertNotIn("封面与正文总页数", prompt)
-            self.assertIn(markdown, prompt)
-            self.assertNotIn("{text}", prompt)
-            return ["## 标题\n\n第一页正文。"]
+        def fake_model(prompt: str) -> dict:
+            self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", markdown), prompt)
+            return plugin_output([markdown])
 
         with patch("common._run_html_pagination_model", side_effect=fake_model):
             pages = common.paginate_markdown_content(markdown)
+        self.assertEqual([markdown], pages)
 
-        self.assertEqual(["## 标题\n\n第一页正文。"], pages)
-
-    def test_html_pagination_caps_body_at_19_pages_before_cover_is_added(self) -> None:
+    def test_plugin_pagination_limits_model_pages_to_twenty(self) -> None:
         markdown = "## 标题\n\n正文。"
-        model_pages = [f"## 正文{i}\n\n内容。" for i in range(1, 21)]
-
-        def fake_model(prompt: str) -> list[str]:
-            self.assertIn("正文分页结果**不得超过 19 页**", prompt)
-            self.assertNotIn("封面与正文总页数", prompt)
-            return model_pages
-
-        with patch("common._run_html_pagination_model", side_effect=fake_model):
+        model_pages = [f"## 正文{i}\n\n内容。" for i in range(1, 23)]
+        with patch("common._run_html_pagination_model", return_value=plugin_output(model_pages)):
             pages = common.paginate_markdown_content(markdown)
-
-        self.assertEqual(19, len(pages))
+        self.assertEqual(model_pages[:20], pages)
 
 
 class StageCMarkdownUploadTest(unittest.TestCase):

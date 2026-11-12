@@ -151,9 +151,9 @@ class PrepareCourseJsonTest(unittest.TestCase):
         def fake_paginate(
             text: str,
             *,
-            omit_trailing_key_points_page: bool = False,
             section_id: str | None = None,
             pagination_cache: common.HtmlPaginationCache | None = None,
+            model_output_path: Path | None = None,
         ) -> list[str]:
             paginated_input.append(text)
             return ["## Visible heading\n\nVisible text"]

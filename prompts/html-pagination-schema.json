@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "properties": {
+    "pages": {
+      "type": "array",
+      "description": "生成marp格式的ppt页列表，最多20页",
+      "items": {
+        "type": "object",
+        "properties": {
+          "marp_code": {
+            "type": "string",
+            "description": "本页ppt的Marp代码，严格遵守Marp语法"
+          },
+          "content": {
+            "type": "string",
+            "description": "本页ppt的原文，确保和原文档内容一致，且保留格式，不要丢失标题"
+          }
+        },
+        "required": [
+          "marp_code",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "pages"
+  ],
+  "additionalProperties": false
+}
