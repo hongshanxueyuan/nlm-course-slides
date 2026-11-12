@@ -234,7 +234,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                                     "id": "1.2",
                                     "title": "1.2 边界测试",
                                     "block_type": "html",
-                                    "content": "原始课程正文。",
+                                    "content": "\n\n".join(pages),
                                 }
                             ],
                         },
@@ -249,7 +249,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 self.assertIn(expected_tail, section["page_content"][-1])
                 self.assertEqual(section["page_count"], len(section["page_content"]))
 
-    def test_stage_b_omits_explicit_html_summary_page_after_validating_source_count(self) -> None:
+    def test_stage_b_keeps_explicit_html_summary_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest_path = root / "manifest.json"
@@ -280,10 +280,13 @@ class StageBMarkdownContractTest(unittest.TestCase):
             section = payload["sections"][0]
             md_body = (output_dir / section["md_name"]).read_text(encoding="utf-8")
 
-            self.assertEqual(["# 显式分页", "## 正文\n\n内容。"], section["page_content"])
-            self.assertEqual(2, section["page_count"])
-            self.assertNotIn("摘要。", md_body)
-            self._assert_marker_alignment(md_body, 2)
+            self.assertEqual(
+                ["# 显式分页", "## 正文\n\n内容。", "## 本节要点\n\n摘要。"],
+                section["page_content"],
+            )
+            self.assertEqual(3, section["page_count"])
+            self.assertIn("摘要。", md_body)
+            self._assert_marker_alignment(md_body, 3)
 
     def test_stage_b_preserves_only_teaching_key_points_and_adds_cover(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -380,7 +383,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                     ),
                 )
 
-    def test_stage_b_removes_cover_title_when_repeated_at_start_of_body(self) -> None:
+    def test_stage_b_preserves_cover_title_when_repeated_in_body(self) -> None:
         cover_title = "从 AI 建议转向建议执行监督闭环"
         body_pages = [
             f"# {cover_title}\n\n本节介绍的是{cover_title}。",
@@ -419,7 +422,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 self.assertEqual(
                     [
                         f"# {cover_title}",
-                        f"本节介绍的是{cover_title}。",
+                        f"# {cover_title}\n\n本节介绍的是{cover_title}。",
                         f"## {cover_title}\n\n后续正文。",
                     ],
                     section["page_content"],
@@ -478,12 +481,16 @@ class StageBMarkdownContractTest(unittest.TestCase):
         self.assertEqual("## 本节要点\n\n总结内容。", section["page_content"][-1])
         self._assert_marker_alignment(md_body, 20)
 
-    def test_stage_b_preserves_teaching_key_points_with_cover_page_limit(self) -> None:
+    def test_stage_b_preserves_teaching_content_with_cover_page_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest_path = root / "manifest.json"
             output_dir = root / "out"
             report_path = output_dir / "section-list.json"
+            model_pages = [
+                f"## 正文{i}\n\n第{i}页内容。"
+                for i in range(1, 19)
+            ] + ["## 本节要点\n\n总结内容。"]
             manifest_path.write_text(
                 json.dumps(
                     {
@@ -493,7 +500,7 @@ class StageBMarkdownContractTest(unittest.TestCase):
                             {
                                 "id": "1",
                                 "title": "1.1 出海章节",
-                                "content": "来源正文。",
+                                "content": "\n\n".join(model_pages),
                             }
                         ],
                     },
@@ -501,14 +508,9 @@ class StageBMarkdownContractTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            model_pages = [
-                f"## 正文{i}\n\n第{i}页内容。"
-                for i in range(1, 20)
-            ] + ["## 本节要点\n\n总结内容。"]
-
             def fake_model(request: common.HtmlPaginationRequest) -> dict:
                 prompt = request.prompt
-                self.assertIn("最多生成 20 页", prompt)
+                self.assertIn("最多 19 页正文", prompt)
                 return plugin_output(model_pages)
 
             argv = [
@@ -681,12 +683,12 @@ class StageBMarkdownContractTest(unittest.TestCase):
             pages = common.paginate_markdown_content(markdown)
         self.assertEqual([markdown], pages)
 
-    def test_plugin_pagination_limits_model_pages_to_twenty(self) -> None:
-        markdown = "## 标题\n\n正文。"
+    def test_plugin_pagination_rejects_more_than_nineteen_body_pages(self) -> None:
         model_pages = [f"## 正文{i}\n\n内容。" for i in range(1, 23)]
+        markdown = "\n\n".join(model_pages)
         with patch("common._run_html_pagination_model", return_value=plugin_output(model_pages)):
-            pages = common.paginate_markdown_content(markdown)
-        self.assertEqual(model_pages[:20], pages)
+            with self.assertRaisesRegex(RuntimeError, "more than 19 body pages"):
+                common.paginate_markdown_content(markdown)
 
 
 class StageCMarkdownUploadTest(unittest.TestCase):

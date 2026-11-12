@@ -72,12 +72,11 @@ python3 scripts/prepare_course_json.py --json-stdin
 补充说明：
 
 - 对 `imagesgallery` 路线，阶段 B 先移除组件 `text` 中的所有反斜杠，再规范化已有分页文本。
-- 对需要模型分页的 `html` section，先通过 worker 调用 OpenAI SDK，使用当前 Codex 提供商配置、`gpt-6.1-terra` 和 `xhigh` 推理强度；不支持时报告失败。每节保留模型双字段分页 JSON，再由 `content` 形成最终页面清单，汇总写入 `section-list.json` 和对应 `.md` 文件。
+- 对需要模型分页的 `html` section，先通过 worker 调用 OpenAI SDK，使用当前 Codex 提供商配置、`gpt-6.1-terra` 和 `medium` 推理强度；不支持时报告失败。模型只返回页面原文 `content`，worker 校验其按顺序完整覆盖输入正文后，形成最终页面清单并写入 `section-list.json` 和对应 `.md` 文件。
 - 每个子 agent 只处理一个 `section_index`，运行分页 worker 并返回结果路径；分页内容留在结果文件中。
 - 文字讲解组件是 HTML 分页来源；独立的“本节要点”组件不进入分页。文字讲解正文中的“本节要点”标题和内容保留，源课程不变。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
-- 加入封面后，Stage B 会检查其后的每一页：页面去掉首尾空白后若只有一行 Markdown 标题（`#` 到 `######`），且标题文本与封面标题完全相同，就删除这张重复标题页；标题级别不影响匹配。保留含有正文或其他内容的同名标题页。随后从去重后的同一页面列表生成 canonical Markdown 和 `section-list.json`，并重算 `page_count` 与页标记。
-- 插件分页最多 20 页；封面随后插入，最终页面列表最多 20 页。正文页超限时只合并相邻正文页，封面不参与合并；模型分页 JSON 不被改写。相邻正文页完全相同的标题只保留一次，其正文保留。
+- 加入封面后，Stage B 保留所有原文页面，包括与封面同名或彼此重复的标题；不删减、去重或改写页面正文。封面随后插入，最终页面列表最多 20 页；需要控制页数时只合并相邻页面并保留全部原文。
 - 最终页面列表同时生成 canonical Markdown 和 `section-list.json`；`page_count` 必须等于 `page_content` 条数及 Markdown 页标记数。下游 `ppt-to-imagesgallery` 继续按 `page_count`、`page_content` 和真实 PPT 页数匹配处理。
 
 命令：
@@ -113,7 +112,7 @@ python3 scripts/html_pagination_worker.py /path/to/course.json --list-jobs
 
 - `section-list.json`
 - 每个 section 对应的 `.md` 文件
-- worker 目录中的 `section-NNNN.model.json`：每节模型原始分页 JSON，包含 `marp_code` 和 `content`，不含封面及后处理。直接运行聚合入口时保存在输出目录 `.html-pagination-model/` 下。
+- worker 目录中的 `section-NNNN.model.json`：每节模型返回的原文分页 JSON，不含封面。直接运行聚合入口时保存在输出目录 `.html-pagination-model/` 下。
 
 向用户汇报时至少展示：
 

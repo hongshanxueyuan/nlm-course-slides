@@ -46,7 +46,11 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
         env_patch.start()
         self.addCleanup(env_patch.stop)
 
-    def _write_manifest(self, root: Path) -> Path:
+    def _write_manifest(
+        self,
+        root: Path,
+        content: str = "## Body\n\nOriginal content.",
+    ) -> Path:
         manifest_path = root / "manifest.json"
         manifest_path.write_text(
             json.dumps(
@@ -57,7 +61,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                             "id": "1.1",
                             "title": "1.1 HTML section",
                             "block_type": "html",
-                            "content": "## Teaching\n\nHTML section source.",
+                            "content": content,
                         },
                         {
                             "id": "1.2",
@@ -76,12 +80,14 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_worker_preserves_plugin_pages_and_aggregates_content(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            first_content = "## Generated page\n\nFull example and details.\n\n- Parent\n\n    - Child\n\n        Continuation.\n\n```markdown\n\n###\n\n    code\n\n```"
+            second_content = "## 本节要点\n\nThis is part of the teaching text.  "
+            manifest_path = self._write_manifest(root, f"{first_content}\n\n{second_content}")
             workers = root / "workers"
             codex_home = _write_provider(root)
             raw = {"pages": [
-                {"marp_code": "## Short\n- A", "content": "## Generated page\n\nFull example and details.\n\n- Parent\n\n    - Child\n\n        Continuation.\n\n```markdown\n\n###\n\n    code\n\n```"},
-                {"marp_code": "## Short\n- B", "content": "## 本节要点\n\nThis is part of the teaching text.  "},
+                {"content": first_content},
+                {"content": second_content},
             ]}
             requests = []
             def send(request):
@@ -104,22 +110,21 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             self.assertEqual(raw, json.loads(raw_path.read_text(encoding="utf-8")))
             self.assertEqual("gpt-6.1-terra", requests[0]["model"])
             self.assertEqual(["system", "user"], [message["role"] for message in requests[0]["input"]])
-            self.assertIn("HTML section source.", requests[0]["input"][1]["content"])
+            self.assertIn(first_content, requests[0]["input"][1]["content"])
             self.assertEqual(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8"), requests[0]["input"][0]["content"])
-            self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", "## Teaching\n\nHTML section source."), requests[0]["input"][1]["content"])
-            self.assertEqual("xhigh", requests[0]["reasoning"]["effort"])
+            self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", f"{first_content}\n\n{second_content}"), requests[0]["input"][1]["content"])
+            self.assertEqual("medium", requests[0]["reasoning"]["effort"])
             self.assertEqual(json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8")), requests[0]["text"]["format"]["schema"])
 
     def test_twenty_model_pages_are_cleaned_once_and_merged_without_losing_text(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
             workers = root / "workers"
             codex_home = _write_provider(root)
-            contents = ["# HTML section\n\n## Same\n\n###\n\nFirst detail.", "## Same\n\n    - Second detail."]
-            contents += [f"## Page {index}\n\nDetail {index}." for index in range(3, 21)]
-            contents += ["", "## Excess 22\n\nExcess twenty-two."]
-            raw = {"pages": [{"marp_code": f"- slide {index}", "content": content} for index, content in enumerate(contents)]}
+            contents = ["# HTML section", "## Same\n\nFirst detail.", "## Same\n\nSecond detail."]
+            contents += [f"## Page {index}\n\nDetail {index}." for index in range(3, 19)]
+            manifest_path = self._write_manifest(root, "\n\n".join(contents))
+            raw = {"pages": [{"content": content} for content in contents]}
             def send(request):
                 return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw, ensure_ascii=False)), request=request)
 
@@ -133,11 +138,9 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             self.assertEqual(20, section.page_count)
             self.assertEqual(section.page_content, common.parse_canonical_markdown_pages(markdown, section_title=section.title, output_stem=Path(section.md_name).stem))
             self.assertEqual(raw, json.loads((workers / "section-0001.model.json").read_text(encoding="utf-8")))
-            self.assertEqual(1, markdown.count("## Same"))
-            self.assertIn("\n\n    - Second detail.", markdown)
-            self.assertNotIn("###\n", markdown)
-            self.assertNotIn("Excess twenty-two.", markdown)
-            for fragment in ["First detail.", "Second detail.", *[f"Detail {index}." for index in range(3, 21)]]:
+            self.assertEqual(2, markdown.count("## Same"))
+            self.assertIn("# HTML section", section.page_content)
+            for fragment in ["First detail.", "Second detail.", *[f"Detail {index}." for index in range(3, 19)]]:
                 self.assertEqual(1, markdown.count(fragment))
 
     def test_separate_key_points_component_is_excluded_but_teaching_text_is_kept(self) -> None:
@@ -156,7 +159,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             original = manifest_path.read_bytes()
             codex_home = _write_provider(root)
             requests = []
-            raw = {"pages": [{"marp_code": "- short", "content": "## 本节要点\n\n教学中的内容。"}]}
+            raw = {"pages": [{"content": "## 本节要点\n\n教学中的内容。"}]}
             def send(request):
                 requests.append(json.loads(request.content.decode("utf-8")))
                 return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw, ensure_ascii=False)), request=request)
@@ -177,12 +180,12 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_worker_invalidates_cached_results_when_provider_or_prompt_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Body\n\nOriginal content.")
             workers = root / "workers"
             codex_home = _write_provider(root)
             config_path = codex_home / "config.toml"
             requests = []
-            raw = {"pages": [{"marp_code": "- short", "content": "## Body\n\nOriginal content."}]}
+            raw = {"pages": [{"content": "## Body\n\nOriginal content."}]}
             def send(request):
                 requests.append(str(request.url))
                 return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
@@ -212,11 +215,11 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_worker_restores_missing_raw_model_output_from_valid_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Body\n\nFull details.")
             workers = root / "workers"
             codex_home = _write_provider(root)
             requests = []
-            raw = {"pages": [{"marp_code": "- short", "content": "## Body\n\nFull details."}]}
+            raw = {"pages": [{"content": "## Body\n\nFull details."}]}
             def send(request):
                 requests.append(1)
                 return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
@@ -233,14 +236,14 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_invalid_model_content_is_not_reused_as_a_successful_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Body\n\nValid text.")
             workers = root / "workers"
             codex_home = _write_provider(root)
             requests = []
             def send(request):
                 requests.append(1)
                 content = "<p>Invalid raw HTML</p>" if len(requests) == 1 else "## Body\n\nValid text."
-                raw = {"pages": [{"marp_code": "- slide", "content": content}]}
+                raw = {"pages": [{"content": content}]}
                 return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
 
             with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=partial(_transport, send)):
@@ -253,10 +256,10 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_chat_provider_receives_same_plugin_contract_and_reasoning(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Body\n\nFull detail.")
             codex_home = _write_provider(root, wire_api="chat")
             requests = []
-            raw = {"pages": [{"marp_code": "## short", "content": "## Body\n\nFull detail."}]}
+            raw = {"pages": [{"content": "## Body\n\nFull detail."}]}
             def send(request):
                 requests.append(json.loads(request.content.decode("utf-8")))
                 response = {"id": "chat-test", "object": "chat.completion", "created": 0,
@@ -268,7 +271,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 html_pagination_worker.run_job(manifest_path, root / "workers", 1)
             body = requests[0]
             self.assertEqual("gpt-6.1-terra", body["model"])
-            self.assertEqual("xhigh", body["reasoning_effort"])
+            self.assertEqual("medium", body["reasoning_effort"])
             self.assertEqual(["system", "user"], [message["role"] for message in body["messages"]])
             self.assertEqual(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8"), body["messages"][0]["content"])
             self.assertEqual(json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8")), body["response_format"]["json_schema"]["schema"])
@@ -279,7 +282,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 root = Path(tempdir)
                 manifest_path = self._write_manifest(root)
                 codex_home = _write_provider(root)
-                raw = {"pages": [{"marp_code": "- slide", "content": "## Body\n\nFull detail."}]}
+                raw = {"pages": [{"content": "## Body\n\nFull detail."}]}
                 def send(request):
                     payload = responses_api_payload(json.dumps(raw))
                     payload["model"] = returned_model
@@ -296,7 +299,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             root = Path(tempdir)
             manifest_path = self._write_manifest(root)
             codex_home = _write_provider(root)
-            raw = {"pages": [{"marp_code": "- slide", "content": "## Body\n\nTruncated text."}]}
+            raw = {"pages": [{"content": "## Body\n\nTruncated text."}]}
             def send(request):
                 payload = responses_api_payload(json.dumps(raw))
                 payload["status"] = "incomplete"
@@ -354,7 +357,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             requests = []
             def send(request):
                 requests.append(1)
-                raw = plugin_output([f"## Body\n\nGenerated {len(requests)}."])
+                raw = plugin_output(["Identical source."])
                 return sdk_httpx.Response(200, json=responses_api_payload(json.dumps(raw)), request=request)
 
             output = root / "out"
@@ -364,17 +367,16 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 self.assertEqual(0, list_course_sections.main())
             report = json.loads((output / "section-list.json").read_text(encoding="utf-8"))
             self.assertEqual(2, len(requests))
-            self.assertIn("Generated 1.", report["sections"][0]["page_content"][1])
-            self.assertIn("Generated 2.", report["sections"][1]["page_content"][1])
+            self.assertIn("Identical source.", report["sections"][0]["page_content"][1])
+            self.assertIn("Identical source.", report["sections"][1]["page_content"][1])
             model_files = sorted((output / ".html-pagination-model").glob("*.json"))
             self.assertEqual(2, len(model_files))
-            self.assertIn("Generated 1.", model_files[0].read_text(encoding="utf-8"))
-            self.assertIn("Generated 2.", model_files[1].read_text(encoding="utf-8"))
+            self.assertIn("Identical source.", model_files[0].read_text(encoding="utf-8"))
+            self.assertIn("Identical source.", model_files[1].read_text(encoding="utf-8"))
 
     def test_worker_uses_one_request_snapshot_if_configuration_changes_mid_run(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
             workers = root / "workers"
             codex_home = _write_provider(root, base_url="https://old.example.test/v1")
             config = codex_home / "config.toml"
@@ -387,6 +389,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             schema.write_text(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8"), encoding="utf-8")
             original_schema = json.loads(schema.read_text(encoding="utf-8"))
             requests = []
+            manifest_path = self._write_manifest(root, "## Body\n\nPage content.")
             raw = plugin_output(["## Body\n\nPage content."])
             def send(request):
                 requests.append((str(request.url), json.loads(request.content.decode("utf-8"))))
@@ -405,12 +408,12 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                     schema.write_text(json.dumps(modified), encoding="utf-8")
                     config.write_text(config.read_text(encoding="utf-8").replace("old.example.test", "new.example.test"), encoding="utf-8")
                 return provider
-            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=partial(_transport, send)), patch.object(common, "HTML_PAGINATION_SYSTEM_PATH", system), patch.object(common, "HTML_PAGINATION_USER_PATH", user_prompt), patch.object(common, "HTML_PAGINATION_SCHEMA_PATH", schema), patch.object(common, "HTML_PAGINATION_REASONING_EFFORT", "xhigh"), patch.object(common, "_load_codex_html_pagination_config", side_effect=change_after_provider_snapshot):
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=partial(_transport, send)), patch.object(common, "HTML_PAGINATION_SYSTEM_PATH", system), patch.object(common, "HTML_PAGINATION_USER_PATH", user_prompt), patch.object(common, "HTML_PAGINATION_SCHEMA_PATH", schema), patch.object(common, "HTML_PAGINATION_REASONING_EFFORT", "medium"), patch.object(common, "_load_codex_html_pagination_config", side_effect=change_after_provider_snapshot):
                 html_pagination_worker.run_job(manifest_path, workers, 1)
                 self.assertIn("old.example.test", requests[0][0])
                 self.assertEqual("original system", requests[0][1]["input"][0]["content"])
                 self.assertNotIn("changed user template", requests[0][1]["input"][1]["content"])
-                self.assertEqual("xhigh", requests[0][1]["reasoning"]["effort"])
+                self.assertEqual("medium", requests[0][1]["reasoning"]["effort"])
                 self.assertEqual(original_schema, requests[0][1]["text"]["format"]["schema"])
                 self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
                 html_pagination_worker.run_job(manifest_path, workers, 1)
@@ -462,7 +465,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_worker_plan_runs_one_section_and_aggregator_reuses_its_result(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Generated page\n\nGenerated section content.")
             output_dir = root / "workers"
 
             plan = html_pagination_worker.list_jobs(manifest_path, output_dir)
@@ -498,7 +501,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_worker_rejects_results_for_changed_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Generated page\n\nGenerated section content.")
             output_dir = root / "workers"
             with patch(
                 "common._run_html_pagination_model",
@@ -507,7 +510,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 html_pagination_worker.run_job(manifest_path, output_dir, 1)
 
             manifest_path.write_text(
-                manifest_path.read_text(encoding="utf-8").replace("HTML section source", "Updated source"),
+                manifest_path.read_text(encoding="utf-8").replace("Generated section content", "Updated source"),
                 encoding="utf-8",
             )
             manifest = common.load_course_manifest(manifest_path)
@@ -539,7 +542,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
     def test_aggregator_writes_the_section_list_from_worker_results(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
-            manifest_path = self._write_manifest(root)
+            manifest_path = self._write_manifest(root, "## Generated page\n\nGenerated section content.")
             workers_dir = root / "workers"
             with patch(
                 "common._run_html_pagination_model",
