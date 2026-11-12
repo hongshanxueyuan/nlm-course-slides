@@ -186,7 +186,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         self.assertEqual("https://provider.example.test/v1/responses", requests[0]["url"])
         self.assertEqual("Bearer temporary-azure-key", requests[0]["authorization"])
         self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
-        self.assertEqual(600, requests[0]["timeout"]["read"])
+        self.assertEqual(1800, requests[0]["timeout"]["read"])
         self.assertEqual("gpt-6.1-terra", requests[0]["body"]["model"])
         self.assertIn("Rendered course text.", requests[0]["body"]["input"][1]["content"])
         self.assertEqual(
@@ -224,7 +224,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
 
         self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
         self.assertEqual("Bearer temporary-azure-key", requests[0]["authorization"])
-        self.assertEqual(600, requests[0]["timeout"]["read"])
+        self.assertEqual(1800, requests[0]["timeout"]["read"])
 
     def test_stage_b_reports_progress_and_reuses_successful_pages_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
