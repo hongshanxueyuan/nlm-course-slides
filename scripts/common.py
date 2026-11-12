@@ -106,7 +106,7 @@ NLM_RATE_LIMIT_MAX_DELAY_SECONDS = 240.0
 NLM_RATE_LIMIT_MAX_RETRIES = 4
 NLM_RATE_LIMIT_LOCK_PATH = Path(tempfile.gettempdir()) / "nlm-course-slides.rate-limit.lock"
 NLM_STATUS_RATE_LIMIT_LOCK_PATH = Path(tempfile.gettempdir()) / "nlm-course-slides.status-rate-limit.lock"
-PAGE_MARKER_RE = re.compile(r"^\s*-\s*第\s*(\d+)\s*页\s*$", re.MULTILINE)
+PAGE_MARKER_RE = re.compile(r"^[ \t]*-[ \t]*第[ \t]*(\d+)[ \t]*页[ \t]*\r?$", re.MULTILINE)
 HTML_TAG_RE = re.compile(r"<[A-Za-z/!][^>]*>")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 HTML_IMAGE_TAG_RE = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
@@ -832,7 +832,7 @@ def parse_canonical_markdown_pages(
     output_stem: str,
     allow_legacy_preface: bool = False,
 ) -> list[str]:
-    normalized = _normalize_newlines(text or "").strip()
+    normalized = _normalize_newlines(text or "").strip("\n")
     if allow_legacy_preface:
         normalized = _strip_legacy_preface(
             normalized,
@@ -871,7 +871,7 @@ def serialize_canonical_markdown(page_content: list[str]) -> str:
         f"- 第 {index} 页\n\n{page}"
         for index, page in enumerate(pages, start=1)
     ]
-    return "\n\n".join(rendered_pages).strip() + "\n"
+    return "\n\n".join(rendered_pages) + "\n"
 
 
 def _collect_fira_source_blocks(section_data: dict[str, Any]) -> list[SectionSourceBlock]:
@@ -883,10 +883,10 @@ def _collect_fira_source_blocks(section_data: dict[str, Any]) -> list[SectionSou
         for block in vertical.get("blocks") or []:
             if not isinstance(block, dict):
                 continue
-            text = str(block.get("text") or "").strip()
+            text = str(block.get("text") or "").strip("\r\n")
             category = str(block.get("category") or "").strip()
             name = str(block.get("name") or "").strip()
-            if not text or not category:
+            if not text.strip() or not category:
                 continue
             source_blocks.append(
                 SectionSourceBlock(
@@ -931,7 +931,7 @@ def _extract_fira_section_content(
     if course_block_type == "imagesgallery":
         gallery_blocks = _select_fira_blocks(source_blocks, category="imagesgallery")
         if gallery_blocks:
-            return gallery_blocks[0].text.strip(), source_blocks
+            return gallery_blocks[0].text.strip("\r\n"), source_blocks
 
     html_blocks = _select_fira_teaching_blocks(source_blocks)
     html_texts = [block.text.strip() for block in html_blocks if block.text.strip()]
@@ -990,7 +990,7 @@ def _select_imagesgallery_source_text(section: Section) -> str:
 
 
 def _remove_backslashes(text: str) -> str:
-    return (text or "").replace("\\", "").strip()
+    return (text or "").replace("\\", "").strip("\r\n")
 
 
 def _select_html_source_text(section: Section) -> str:
@@ -2063,7 +2063,7 @@ def _normalize_manifest(
                 or item.get("body")
                 or item.get("markdown")
                 or ""
-            ).strip()
+            ).strip("\r\n")
             focus = item.get("focus") or item.get("prompt")
             resource_title = item.get("resource_title") or item.get("source_title")
             output_name = item.get("output_name") or item.get("filename")
@@ -2089,10 +2089,10 @@ def _normalize_manifest(
                     f"block_type for section {section_id} must be 'imagesgallery' or 'html' in {source}"
                 )
 
-            if not content and page_content:
+            if not content.strip() and page_content:
                 content = "\n\n".join(page_content).strip()
 
-            if content or page_content:
+            if content.strip() or page_content:
                 counter += 1
                 slug = str(item.get("slug") or slugify(title, fallback=f"section-{counter}"))
                 resolved_output_name = str(output_name or default_output_name(section_id, title))

@@ -81,7 +81,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             codex_home = _write_provider(root)
             raw = {"pages": [
                 {"marp_code": "## Short\n- A", "content": "## Generated page\n\nFull example and details.\n\n- Parent\n\n    - Child\n\n        Continuation.\n\n```markdown\n\n###\n\n    code\n\n```"},
-                {"marp_code": "## Short\n- B", "content": "## 本节要点\n\nThis is part of the teaching text."},
+                {"marp_code": "## Short\n- B", "content": "## 本节要点\n\nThis is part of the teaching text.  "},
             ]}
             requests = []
             def send(request):
@@ -92,13 +92,15 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 html_pagination_worker.run_job(manifest_path, workers, 1)
                 raw_path = workers / "section-0001.model.json"
                 self.assertEqual(raw, json.loads(raw_path.read_text(encoding="utf-8")))
-                manifest = common.load_course_manifest(manifest_path)
-                html_pagination_worker.apply_results(manifest, workers)
-                common.materialize_markdown_artifacts(manifest, output_dir=root / "output")
-            section = manifest.sections[0]
-            markdown = (root / "output" / section.md_name).read_text(encoding="utf-8")
-            self.assertEqual(["# HTML section", "## Generated page\n\nFull example and details.\n\n- Parent\n\n    - Child\n\n        Continuation.\n\n```markdown\n\n###\n\n    code\n\n```", "## 本节要点\n\nThis is part of the teaching text."], section.page_content)
-            self.assertEqual(section.page_content, common.parse_canonical_markdown_pages(markdown, section_title=section.title, output_stem=Path(section.md_name).stem))
+                output = root / "output"
+                argv = ["list_course_sections.py", str(manifest_path), "--output-dir", str(output), "--pagination-results-dir", str(workers)]
+                with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, list_course_sections.main())
+            section = json.loads((output / "section-list.json").read_text(encoding="utf-8"))["sections"][0]
+            markdown = (output / section["md_name"]).read_text(encoding="utf-8")
+            self.assertEqual(["# HTML section", "## Generated page\n\nFull example and details.\n\n- Parent\n\n    - Child\n\n        Continuation.\n\n```markdown\n\n###\n\n    code\n\n```", "## 本节要点\n\nThis is part of the teaching text.  "], section["page_content"])
+            self.assertEqual(section["page_count"], len(section["page_content"]))
+            self.assertEqual(section["page_content"], common.parse_canonical_markdown_pages(markdown, section_title=section["section_title"], output_stem=Path(section["md_name"]).stem))
             self.assertEqual(raw, json.loads(raw_path.read_text(encoding="utf-8")))
             self.assertEqual("gpt-6.1-terra", requests[0]["model"])
             self.assertEqual(["system", "user"], [message["role"] for message in requests[0]["input"]])
@@ -418,6 +420,44 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 self.assertEqual("high", requests[1][1]["reasoning"]["effort"])
                 self.assertEqual("cached", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
             self.assertEqual(2, len(requests))
+
+    def test_existing_page_routes_keep_final_line_spaces_in_report_and_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            path = root / "manifest.json"
+            path.write_text(json.dumps({"course_title": "Existing routes", "sections": [
+                {"id": "1", "title": "Explicit", "block_type": "html", "page_content": ["    - Parent\n\n        - Child  "]},
+                {"id": "2", "title": "Gallery", "block_type": "imagesgallery", "content": "- 第 1 页\r\n\r\n## Gallery\r\n\r\nFinal line  \r\n"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+            output = root / "out"
+            argv = ["list_course_sections.py", str(path), "--output-dir", str(output)]
+            with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, list_course_sections.main())
+            report = json.loads((output / "section-list.json").read_text(encoding="utf-8"))
+            expected = ["    - Parent\n\n        - Child  ", "Final line  "]
+            for section, expected_page in zip(report["sections"], expected):
+                markdown = (output / section["md_name"]).read_text(encoding="utf-8")
+                self.assertEqual(expected_page, section["page_content"][-1])
+                self.assertEqual(section["page_content"], common.parse_canonical_markdown_pages(markdown, section_title=section["section_title"], output_stem=Path(section["md_name"]).stem))
+                self.assertEqual(section["page_count"], len(section["page_content"]))
+
+    def test_fira_imagesgallery_preserves_trailing_spaces_on_every_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            path = root / "course.json"
+            course = {"name": "Course", "chapters": [{"name": "Chapter", "sections": [
+                {"name": "Overview"}, {"name": "1.1 Gallery", "verticals": [{"name": "Lesson", "blocks": [
+                    {"category": "imagesgallery", "name": "Gallery", "text": "- 第 1 页\n\nFirst line  \n\n- 第 2 页\n\nLast line  \n"}
+                ]}]}]}]}
+            path.write_text(json.dumps(course, ensure_ascii=False), encoding="utf-8")
+            output = root / "out"
+            argv = ["list_course_sections.py", str(path), "--output-dir", str(output)]
+            with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, list_course_sections.main())
+            section = json.loads((output / "section-list.json").read_text(encoding="utf-8"))["sections"][0]
+            markdown = (output / section["md_name"]).read_text(encoding="utf-8")
+            self.assertEqual(["# Gallery", "First line  ", "Last line  "], section["page_content"])
+            self.assertEqual(section["page_content"], common.parse_canonical_markdown_pages(markdown, section_title=section["section_title"], output_stem=Path(section["md_name"]).stem))
 
     def test_worker_plan_runs_one_section_and_aggregator_reuses_its_result(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
