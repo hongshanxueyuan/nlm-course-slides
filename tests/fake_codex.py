@@ -24,7 +24,7 @@ def responses_api_payload(output_text: str) -> dict:
         "object": "response",
         "created_at": 0,
         "status": "completed",
-        "model": "gpt-5.4",
+        "model": "gpt-6.1-terra",
         "output": [
             {
                 "id": "msg_test",
