@@ -59,7 +59,7 @@ def _fake_sdk_http_client(**kwargs):
         request_payload = json.loads(request.content.decode("utf-8"))
         prompt = request_payload["input"][1]["content"]
         match = re.search(
-            r"## 文档内容\s*```\s*(.*?)\s*```\s*\n\s*## 输出格式",
+            r"## 文档内容\s*```(?:markdown)?[ \t]*\r?\n(.*?)\r?\n```[ \t]*\r?\n\s*## 输出格式",
             prompt,
             flags=re.DOTALL,
         )

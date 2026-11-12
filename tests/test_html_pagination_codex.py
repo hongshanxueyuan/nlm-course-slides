@@ -145,7 +145,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
 
     @staticmethod
     def _html_section(
-        content: str = "## Teaching\n\nRendered course text.",
+        content: str = "## Generated body\n\nSDK split output.",
         *,
         section_id: str = "1.1",
         title: str = "1.1 SDK boundary",
@@ -188,7 +188,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
         self.assertEqual("temporary-azure-key", requests[0]["api_key_header"])
         self.assertEqual(1800, requests[0]["timeout"]["read"])
         self.assertEqual("gpt-6.1-terra", requests[0]["body"]["model"])
-        self.assertIn("Rendered course text.", requests[0]["body"]["input"][1]["content"])
+        self.assertIn("SDK split output.", requests[0]["body"]["input"][1]["content"])
         self.assertEqual(
             ["# SDK boundary", "## Generated body\n\nSDK split output."],
             section["page_content"],
@@ -210,7 +210,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
             manifest_path = self._write_manifest(root, [self._html_section()])
             requests: list[dict] = []
             transport_factory = self._http_client_for_response(
-                json.dumps({"pages": ["## Generated body\\n\\nSDK split output."]}),
+                json.dumps({"pages": ["## Generated body\n\nSDK split output."]}),
                 requests,
             )
 
@@ -261,7 +261,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
                 return httpx.Response(
                     200,
                     json=responses_api_payload(
-                        json.dumps({"pages": ["## First body\\n\\nFIRST PAGE"]})
+                        json.dumps({"pages": ["## First body\n\nFIRST PAGE"]})
                     ),
                     request=request,
                 )
@@ -299,7 +299,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
                 return httpx.Response(
                     200,
                     json=responses_api_payload(
-                        json.dumps({"pages": [f"## {heading}\\n\\n{page_text}"]})
+                        json.dumps({"pages": [f"## {heading}\n\n{page_text}"]})
                     ),
                     request=request,
                 )
@@ -327,7 +327,7 @@ class HtmlPaginationCodexTest(unittest.TestCase):
             manifest_path = self._write_manifest(root, [self._html_section()])
             requests: list[dict] = []
             transport_factory = self._http_client_for_response(
-                json.dumps({"pages": ["## Generated body\\n\\nSDK split output."]}),
+                json.dumps({"pages": ["## Generated body\n\nSDK split output."]}),
                 requests,
             )
             stderr = io.StringIO()
@@ -349,7 +349,10 @@ class HtmlPaginationCodexTest(unittest.TestCase):
             root = Path(tempdir)
             codex_home = root / ".codex"
             self._write_codex_home(codex_home)
-            manifest_path = self._write_manifest(root, [self._html_section()])
+            manifest_path = self._write_manifest(
+                root,
+                [self._html_section("## Body\n\nContent.")],
+            )
             requests: list[dict] = []
             transport_factory = self._http_client_for_response(
                 json.dumps({"pages": ["## Body\n\nContent."]}),

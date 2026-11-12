@@ -437,7 +437,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
                 self.assertEqual(0, list_course_sections.main())
             report = json.loads((output / "section-list.json").read_text(encoding="utf-8"))
-            expected = ["    - Parent\n\n        - Child  ", "Final line  "]
+            expected = ["    - Parent\n\n        - Child  ", "## Gallery\n\nFinal line  "]
             for section, expected_page in zip(report["sections"], expected):
                 markdown = (output / section["md_name"]).read_text(encoding="utf-8")
                 self.assertEqual(expected_page, section["page_content"][-1])
