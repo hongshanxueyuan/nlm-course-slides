@@ -279,7 +279,6 @@ def apply_results(manifest: CourseManifest, output_dir: Path) -> None:
             )
         section.page_content = pages
         section.page_count = len(pages)
-        section.model_pagination_result = True
 
 
 def main() -> int:

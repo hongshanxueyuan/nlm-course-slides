@@ -3,21 +3,16 @@
   "properties": {
     "pages": {
       "type": "array",
-      "description": "生成marp格式的ppt页列表，最多20页",
+      "description": "按原文顺序切分的页面正文，最多19页",
       "items": {
         "type": "object",
         "properties": {
-          "marp_code": {
-            "type": "string",
-            "description": "本页ppt的Marp代码，严格遵守Marp语法"
-          },
           "content": {
             "type": "string",
-            "description": "本页ppt的原文，确保和原文档内容一致，且保留格式，不要丢失标题"
+            "description": "本页对应的连续原文片段，保留原文文字与Markdown格式"
           }
         },
         "required": [
-          "marp_code",
           "content"
         ],
         "additionalProperties": false

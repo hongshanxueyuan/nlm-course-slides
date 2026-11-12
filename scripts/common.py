@@ -120,11 +120,10 @@ HTML_HEAD_BLOCK_RE = re.compile(
     r"<head\b[^>]*>.*?</head>", flags=re.IGNORECASE | re.DOTALL
 )
 EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
-SUMMARY_HEADING_TEXTS = {"本节要点", "总结", "复盘"}
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
-HTML_PAGINATION_REASONING_EFFORT = "xhigh"
+HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
 HTML_PAGINATION_SCHEMA_PATH = PROMPTS_DIR / "html-pagination-schema.json"
@@ -152,7 +151,6 @@ class Section:
     page_content: list[str] | None = None
     page_count: int | None = None
     source_blocks: list[SectionSourceBlock] | None = None
-    model_pagination_result: bool = field(default=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -204,7 +202,7 @@ class HtmlPaginationCache:
             try:
                 validated = _validate_html_pagination_model_output(payload)
                 _normalize_explicit_page_content(
-                    [page["content"] for page in validated["pages"][:HTML_PAGINATION_MAX_PAGES]]
+                    [page["content"] for page in validated["pages"]]
                 )
                 return validated
             except RuntimeError:
@@ -427,62 +425,6 @@ def _normalize_explicit_page_content(page_content: list[str]) -> list[str]:
     return pages
 
 
-def _heading_text(block: str) -> str | None:
-    first_line = block.splitlines()[0].strip()
-    match = re.match(r"^#{1,6}\s+(.+)$", first_line)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def _remove_duplicate_cover_heading(pages: list[str], *, title: str) -> list[str]:
-    if not pages or _heading_text(pages[0]) != title:
-        return pages
-
-    remaining_lines = pages[0].splitlines()[1:]
-    remaining_body = _clean_page_body("\n".join(remaining_lines))
-    remaining_pages = pages[1:]
-    if remaining_body:
-        return [remaining_body, *remaining_pages]
-    return remaining_pages
-
-
-def _remove_duplicate_title_only_pages(pages: list[str], *, title: str) -> list[str]:
-    filtered_pages: list[str] = []
-    for page in pages:
-        non_empty_lines = [line.strip() for line in page.splitlines() if line.strip()]
-        is_duplicate_title_page = (
-            len(non_empty_lines) == 1 and _heading_text(non_empty_lines[0]) == title
-        )
-        if not is_duplicate_title_page:
-            filtered_pages.append(page)
-    return filtered_pages
-
-
-def _remove_adjacent_duplicate_headings(pages: list[str]) -> list[str]:
-    result: list[str] = []
-    previous_title: str | None = None
-    for page in pages:
-        title = _heading_text(page)
-        if title and title == previous_title:
-            page = _clean_page_body("\n".join(page.splitlines()[1:]))
-        previous_title = title
-        if page:
-            result.append(page)
-    return result
-
-
-def _is_summary_block(block: str) -> bool:
-    title = _heading_text(block)
-    return bool(title and title in SUMMARY_HEADING_TEXTS)
-
-
-def _omit_trailing_key_points_page(pages: list[str]) -> list[str]:
-    if pages and _heading_text(pages[-1]) == "本节要点":
-        return pages[:-1]
-    return pages
-
-
 def _chunk_units(units: list[str], chunk_count: int) -> list[str]:
     chunks: list[str] = []
     start = 0
@@ -500,21 +442,11 @@ def _collapse_units_to_page_limit(
     units: list[str],
     *,
     max_pages: int,
-    preserve_summary_page: bool,
 ) -> list[str]:
     if len(units) <= max_pages:
         return [unit for unit in units if unit.strip()]
 
-    keep_summary = preserve_summary_page and bool(units) and _is_summary_block(units[-1])
-    main_units = units[:-1] if keep_summary else units
-    page_slots = max_pages - 1 if keep_summary else max_pages
-    if page_slots <= 0:
-        raise RuntimeError(f"Could not fit paginated content within {max_pages} pages")
-
-    pages = _chunk_units(main_units, page_slots)
-    if keep_summary:
-        pages.append(units[-1])
-    return [page for page in pages if page]
+    return _chunk_units(units, max_pages)
 
 
 def _load_html_pagination_assets() -> tuple[str, str, dict[str, Any]]:
@@ -577,15 +509,13 @@ def _validate_html_pagination_model_output(payload: Any) -> dict[str, Any]:
         raise RuntimeError("html pagination model must return an object with a 'pages' list")
     if not payload["pages"]:
         raise RuntimeError("html pagination model must return at least one page")
-    for index, page in enumerate(payload["pages"][:HTML_PAGINATION_MAX_PAGES]):
-        if (
-            not isinstance(page, dict)
-            or not isinstance(page.get("marp_code"), str)
-            or not isinstance(page.get("content"), str)
-        ):
-            raise RuntimeError(
-                f"html pagination page {index + 1} must contain marp_code and content strings"
-            )
+    if len(payload["pages"]) > HTML_PAGINATION_COVER_BODY_MAX_PAGES:
+        raise RuntimeError(
+            f"html pagination model returned more than {HTML_PAGINATION_COVER_BODY_MAX_PAGES} body pages"
+        )
+    for index, page in enumerate(payload["pages"]):
+        if not isinstance(page, dict) or not isinstance(page.get("content"), str):
+            raise RuntimeError(f"html pagination page {index + 1} must contain a content string")
         if not page["content"].strip():
             raise RuntimeError(f"html pagination page {index + 1} content must not be empty")
     return payload
@@ -684,7 +614,7 @@ def _run_html_pagination_model(request: HtmlPaginationRequest) -> dict[str, Any]
                     ],
                     reasoning={"effort": request.reasoning_effort},
                     text={"format": {
-                        "type": "json_schema", "name": "marp_output", "schema": request.schema, "strict": True,
+                        "type": "json_schema", "name": "html_page_content", "schema": request.schema, "strict": True,
                     }},
                 )
                 raw_output = getattr(response, "output_text", None)
@@ -697,7 +627,7 @@ def _run_html_pagination_model(request: HtmlPaginationRequest) -> dict[str, Any]
                     ],
                     reasoning_effort=request.reasoning_effort,
                     response_format={"type": "json_schema", "json_schema": {
-                        "name": "marp_output", "schema": request.schema, "strict": True,
+                        "name": "html_page_content", "schema": request.schema, "strict": True,
                     }},
                 )
                 choices = getattr(response, "choices", None)
@@ -787,12 +717,25 @@ def paginate_markdown_content(
             raise
     if model_output_path is not None:
         write_json(model_output_path, model_output)
-    pages = _normalize_explicit_page_content(
-        [page["content"] for page in model_output["pages"][:HTML_PAGINATION_MAX_PAGES]]
-    )
+    pages = _normalize_explicit_page_content([page["content"] for page in model_output["pages"]])
+    _validate_html_pagination_source_coverage(text, pages)
     if pagination_cache is not None and cache_identity is not None:
         pagination_cache.store(cache_identity, request_hash, model_output)
     return pages
+
+
+def _validate_html_pagination_source_coverage(text: str, pages: list[str]) -> None:
+    source = _clean_page_body(text)
+    cursor = 0
+    for index, page in enumerate(pages, start=1):
+        start = source.find(page, cursor)
+        if start < 0 or source[cursor:start].strip():
+            raise RuntimeError(
+                f"html pagination page {index} is not the next contiguous source passage"
+            )
+        cursor = start + len(page)
+    if source[cursor:].strip():
+        raise RuntimeError("html pagination pages do not cover all source text")
 
 
 def _strip_legacy_preface(
@@ -1025,7 +968,6 @@ def materialize_section_markdown(
 ) -> Path:
     block_type = _resolve_section_block_type(section, default_block_type=default_block_type)
     md_name = _resolve_section_md_name(section)
-    model_paginated = section.model_pagination_result
 
     if section.page_content is not None:
         pages = _normalize_explicit_page_content(section.page_content)
@@ -1037,7 +979,6 @@ def materialize_section_markdown(
             allow_legacy_preface=True,
         )
     else:
-        model_paginated = True
         pages = paginate_markdown_content(
             _select_html_source_text(section),
             section_id=section.id,
@@ -1053,18 +994,11 @@ def materialize_section_markdown(
         raise RuntimeError(
             f"page_count {section.page_count} does not match len(page_content) {len(pages)} for section {section.id}"
         )
-    if section.page_content is not None and block_type == "html" and not section.model_pagination_result:
-        pages = _omit_trailing_key_points_page(pages)
     if include_cover:
         cover_title = strip_section_prefix(section.title)
-        pages = _remove_duplicate_cover_heading(pages, title=cover_title)
-        pages = _remove_duplicate_title_only_pages(pages, title=cover_title)
-        if model_paginated:
-            pages = _remove_adjacent_duplicate_headings(pages)
         pages = _collapse_units_to_page_limit(
             pages,
             max_pages=HTML_PAGINATION_COVER_BODY_MAX_PAGES,
-            preserve_summary_page=True,
         )
         pages.insert(0, f"# {cover_title}")
 
@@ -1982,7 +1916,7 @@ def manifest_to_dict(manifest: CourseManifest) -> dict[str, Any]:
         "source_path": manifest.source_path,
         "course_scene": manifest.course_scene,
         "sections": [
-            {key: value for key, value in asdict(section).items() if key != "model_pagination_result"}
+            asdict(section)
             for section in manifest.sections
         ],
     }

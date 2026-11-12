@@ -19,7 +19,7 @@ sdk_httpx = importlib.import_module(
 
 
 def plugin_output(pages: list[str]) -> dict:
-    return {"pages": [{"marp_code": "- shortened", "content": page} for page in pages]}
+    return {"pages": [{"content": page} for page in pages]}
 
 
 def responses_api_payload(output_text: str) -> dict:
