@@ -77,10 +77,7 @@ def _is_pagination_job(section: Section, manifest: CourseManifest) -> bool:
 
 
 def _request_hash(section: Section) -> str:
-    _rules, _prompt, request_hash = prepare_html_pagination_request(
-        _select_html_source_text(section)
-    )
-    return request_hash
+    return prepare_html_pagination_request(_select_html_source_text(section)).request_hash
 
 
 def _validated_pages(
@@ -192,7 +189,8 @@ def run_job(manifest_path: Path, output_dir: Path, section_index: int) -> dict[s
     result_path = _result_path(output_dir, section_index)
     failure_path = _failure_path(output_dir, section_index)
     try:
-        request_hash = _request_hash(section)
+        pagination_request = prepare_html_pagination_request(_select_html_source_text(section))
+        request_hash = pagination_request.request_hash
         cached_pages = _load_valid_pages(
             result_path,
             manifest_hash=manifest_hash,
@@ -217,6 +215,7 @@ def run_job(manifest_path: Path, output_dir: Path, section_index: int) -> dict[s
             write_artifact=False,
             pagination_cache=HtmlPaginationCache(_cache_path(output_dir, section_index)),
             model_output_path=_model_output_path(output_dir, section_index),
+            pagination_request=pagination_request,
         )
         if section.page_content is None or section.page_count is None:
             raise RuntimeError(f"Section {section.id} did not produce paginated pages")
@@ -228,7 +227,7 @@ def run_job(manifest_path: Path, output_dir: Path, section_index: int) -> dict[s
                     _model_output_path(output_dir, section_index).read_bytes()
                 ).hexdigest(),
                 "manifest_sha256": manifest_hash,
-                "model": HTML_PAGINATION_MODEL,
+                "model": pagination_request.model,
                 "request_hash": request_hash,
                 "section_index": section_index,
                 "section_id": section.id,
