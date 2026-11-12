@@ -107,7 +107,7 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
             self.assertIn("HTML section source.", requests[0]["input"][1]["content"])
             self.assertEqual(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8"), requests[0]["input"][0]["content"])
             self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", "## Teaching\n\nHTML section source."), requests[0]["input"][1]["content"])
-            self.assertEqual("max", requests[0]["reasoning"]["effort"])
+            self.assertEqual("xhigh", requests[0]["reasoning"]["effort"])
             self.assertEqual(json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8")), requests[0]["text"]["format"]["schema"])
 
     def test_twenty_model_pages_are_cleaned_once_and_merged_without_losing_text(self) -> None:
@@ -268,13 +268,13 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                 html_pagination_worker.run_job(manifest_path, root / "workers", 1)
             body = requests[0]
             self.assertEqual("gpt-6.1-terra", body["model"])
-            self.assertEqual("max", body["reasoning_effort"])
+            self.assertEqual("xhigh", body["reasoning_effort"])
             self.assertEqual(["system", "user"], [message["role"] for message in body["messages"]])
             self.assertEqual(common.HTML_PAGINATION_SYSTEM_PATH.read_text(encoding="utf-8"), body["messages"][0]["content"])
             self.assertEqual(json.loads(common.HTML_PAGINATION_SCHEMA_PATH.read_text(encoding="utf-8")), body["response_format"]["json_schema"]["schema"])
 
     def test_worker_rejects_returned_model_or_reasoning_downgrades(self) -> None:
-        for returned_model, returned_effort in [("other-model", "max"), ("gpt-6.1-terra", "low")]:
+        for returned_model, returned_effort in [("other-model", "xhigh"), ("gpt-6.1-terra", "low")]:
             with self.subTest(model=returned_model, effort=returned_effort), tempfile.TemporaryDirectory() as tempdir:
                 root = Path(tempdir)
                 manifest_path = self._write_manifest(root)
@@ -405,12 +405,12 @@ class HtmlPaginationWorkerTest(unittest.TestCase):
                     schema.write_text(json.dumps(modified), encoding="utf-8")
                     config.write_text(config.read_text(encoding="utf-8").replace("old.example.test", "new.example.test"), encoding="utf-8")
                 return provider
-            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=partial(_transport, send)), patch.object(common, "HTML_PAGINATION_SYSTEM_PATH", system), patch.object(common, "HTML_PAGINATION_USER_PATH", user_prompt), patch.object(common, "HTML_PAGINATION_SCHEMA_PATH", schema), patch.object(common, "HTML_PAGINATION_REASONING_EFFORT", "max"), patch.object(common, "_load_codex_html_pagination_config", side_effect=change_after_provider_snapshot):
+            with patch.dict("os.environ", {"CODEX_HOME": str(codex_home), "TEST_API_KEY": "fake-key"}), patch("openai.DefaultHttpxClient", side_effect=partial(_transport, send)), patch.object(common, "HTML_PAGINATION_SYSTEM_PATH", system), patch.object(common, "HTML_PAGINATION_USER_PATH", user_prompt), patch.object(common, "HTML_PAGINATION_SCHEMA_PATH", schema), patch.object(common, "HTML_PAGINATION_REASONING_EFFORT", "xhigh"), patch.object(common, "_load_codex_html_pagination_config", side_effect=change_after_provider_snapshot):
                 html_pagination_worker.run_job(manifest_path, workers, 1)
                 self.assertIn("old.example.test", requests[0][0])
                 self.assertEqual("original system", requests[0][1]["input"][0]["content"])
                 self.assertNotIn("changed user template", requests[0][1]["input"][1]["content"])
-                self.assertEqual("max", requests[0][1]["reasoning"]["effort"])
+                self.assertEqual("xhigh", requests[0][1]["reasoning"]["effort"])
                 self.assertEqual(original_schema, requests[0][1]["text"]["format"]["schema"])
                 self.assertEqual("pending", html_pagination_worker.list_jobs(manifest_path, workers)["jobs"][0]["status"])
                 html_pagination_worker.run_job(manifest_path, workers, 1)

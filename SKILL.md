@@ -72,7 +72,7 @@ python3 scripts/prepare_course_json.py --json-stdin
 补充说明：
 
 - 对 `imagesgallery` 路线，阶段 B 先移除组件 `text` 中的所有反斜杠，再规范化已有分页文本。
-- 对需要模型分页的 `html` section，先通过 worker 调用 OpenAI SDK，使用当前 Codex 提供商配置、`gpt-6.1-terra` 和 `max` 推理强度；不支持时报告失败。每节保留模型双字段分页 JSON，再由 `content` 形成最终页面清单，汇总写入 `section-list.json` 和对应 `.md` 文件。
+- 对需要模型分页的 `html` section，先通过 worker 调用 OpenAI SDK，使用当前 Codex 提供商配置、`gpt-6.1-terra` 和 `xhigh` 推理强度；不支持时报告失败。每节保留模型双字段分页 JSON，再由 `content` 形成最终页面清单，汇总写入 `section-list.json` 和对应 `.md` 文件。
 - 每个子 agent 只处理一个 `section_index`，运行分页 worker 并返回结果路径；分页内容留在结果文件中。
 - 文字讲解组件是 HTML 分页来源；独立的“本节要点”组件不进入分页。文字讲解正文中的“本节要点”标题和内容保留，源课程不变。
 - 两种课程场景都会用 `section_title` 去掉开头章节编号，生成只含主标题的正式封面，并放在最终页面列表第 1 页；封面样式、主视觉和配音要求见对应场景 prompt。
