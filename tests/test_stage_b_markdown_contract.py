@@ -677,6 +677,9 @@ class StageBMarkdownContractTest(unittest.TestCase):
         def fake_model(request: common.HtmlPaginationRequest) -> dict:
             prompt = request.prompt
             self.assertEqual(common.HTML_PAGINATION_USER_PATH.read_text(encoding="utf-8").replace("{text}", markdown), prompt)
+            self.assertIn("同一上级标题下", prompt)
+            self.assertIn("编号小标题", prompt)
+            self.assertNotIn("marp_code", prompt)
             return plugin_output([markdown])
 
         with patch("common._run_html_pagination_model", side_effect=fake_model):
