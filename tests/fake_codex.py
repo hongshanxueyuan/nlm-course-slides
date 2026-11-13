@@ -29,7 +29,8 @@ def responses_api_payload(output_text: str) -> dict:
         pass
     else:
         if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list) and all(isinstance(page, str) for page in parsed["pages"]):
-            output_text = json.dumps(plugin_output(parsed["pages"]), ensure_ascii=False)
+            parsed["pages"] = plugin_output(parsed["pages"])["pages"]
+            output_text = json.dumps(parsed, ensure_ascii=False)
     return {
         "id": "resp_test",
         "object": "response",
@@ -65,7 +66,14 @@ def _fake_sdk_http_client(**kwargs):
         )
         teaching_text = match.group(1).strip() if match else "Fake pagination output."
         pages = [page.strip() for page in re.split(r"\n\n(?=## )", teaching_text) if page.strip()]
-        response_text = json.dumps({"pages": pages}, ensure_ascii=False)
+        response = {"pages": pages}
+        inventory = re.search(r"## 编号标题组判断[\s\S]*?\n(\[{\"group_id\":.*\])(?:\n|$)", prompt)
+        if inventory:
+            response["heading_groups"] = [
+                {"group_id": group["group_id"], "kind": "topics"}
+                for group in json.loads(inventory.group(1))
+            ]
+        response_text = json.dumps(response, ensure_ascii=False)
         return sdk_httpx.Response(
             200,
             json=responses_api_payload(response_text),

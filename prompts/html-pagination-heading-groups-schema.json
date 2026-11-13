@@ -1,0 +1,12 @@
+{
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "group_id": {"type": "string"},
+      "kind": {"type": "string", "enum": ["steps", "topics", "uncertain"]}
+    },
+    "required": ["group_id", "kind"],
+    "additionalProperties": false
+  }
+}

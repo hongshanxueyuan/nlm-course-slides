@@ -1,0 +1,7 @@
+## 编号标题组判断
+
+根据完整正文判断每组是按顺序执行的纯操作步骤（steps），还是并列介绍不同主题的小标题（topics）。步骤不一定含“先”或“再”；正文引用其他步骤本身不能证明该组是步骤。不能确定时选 uncertain。
+
+输出 JSON 中须包含 `heading_groups` 数组，对每个 group_id 恰好返回一条判断，例如 `{"group_id":"h3-l4","kind":"steps"}`。`kind` 只能是 `steps`、`topics` 或 `uncertain`。页面内容仍须完整保留输入正文，不修改标题编号。
+
+{heading_groups}
