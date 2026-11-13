@@ -126,7 +126,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
-HTML_PAGINATION_RULES_VERSION = 4
+HTML_PAGINATION_RULES_VERSION = 5
 HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
@@ -840,9 +840,11 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
     for index, line in enumerate(lines):
         if not outside[index]:
             continue
-        heading = re.match(r"^ {0,3}(#{1,6})\s+.*避坑指南", line)
+        quote = re.match(r"^ {0,3}((?:>[ \t]*)+)", line)
+        unquoted = line[quote.end():] if quote else line
+        heading = re.match(r"^ {0,3}(#{1,6})\s+.*避坑指南", unquoted)
         inline = re.match(
-            r"^ {0,3}(?:>[ \t]*)*(?:\*\*|__)?(?:【避坑指南】|\[避坑指南\]|（避坑指南）|\(避坑指南\)|《避坑指南》|避坑指南)(?:（[^）\r\n]*）|\([^\r\n)]*\))?(?:\*\*|__)?[ \t]*(?:[:：]|$)",
+            r"^ {0,3}(?:>[ \t]*)*(?:\*\*|__)?(?:【避坑指南】|\[避坑指南\]|（避坑指南）|\(避坑指南\)|《避坑指南》|避坑指南)(?:（[^）\r\n]*）|\([^\r\n)]*\))?(?:[—–-]+[^\r\n:：]*?)?(?:\*\*|__)?[ \t]*(?:[:：]|$)",
             line,
         )
         if not heading and not inline:
@@ -850,13 +852,17 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
         end = index + 1
         while end < len(lines):
             candidate = lines[end]
+            candidate_quote = re.match(r"^ {0,3}((?:>[ \t]*)+)", candidate)
+            if heading and quote and (not candidate_quote or candidate_quote.group(1).count(">") < quote.group(1).count(">")):
+                break
+            candidate_content = candidate[candidate_quote.end():] if candidate_quote else candidate
             if not outside[end]:
                 end += 1
                 continue
-            if re.match(r"^ {0,3}(?:[-*_][ \t]*){3,}$", candidate.rstrip("\r\n")):
+            if re.match(r"^ {0,3}(?:[-*_][ \t]*){3,}$", candidate_content.rstrip("\r\n")):
                 break
-            next_heading = re.match(r"^ {0,3}(#{1,6})\s+", candidate)
-            summary = re.match(r"^ {0,3}#{1,6}\s+(?:本节|全节)?(?:总结|小结)(?:[：:].*)?\s*#*\s*$", candidate)
+            next_heading = re.match(r"^ {0,3}(#{1,6})\s+", candidate_content)
+            summary = re.match(r"^ {0,3}#{1,6}\s+(?:本节|全节)?(?:总结|小结)(?:[：:].*)?\s*#*\s*$", candidate_content)
             if next_heading and (summary or not heading or len(next_heading.group(1)) <= len(heading.group(1))):
                 break
             end += 1
