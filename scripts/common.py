@@ -126,7 +126,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
-HTML_PAGINATION_RULES_VERSION = 3
+HTML_PAGINATION_RULES_VERSION = 4
 HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
@@ -842,7 +842,7 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
             continue
         heading = re.match(r"^ {0,3}(#{1,6})\s+.*避坑指南", line)
         inline = re.match(
-            r"^ {0,3}(?:>[ \t]*)*(?:\*\*|__)?(?:【避坑指南】|\[避坑指南\]|（避坑指南）|\(避坑指南\)|《避坑指南》|避坑指南)(?:\*\*|__)?[ \t]*(?:[:：]|$)",
+            r"^ {0,3}(?:>[ \t]*)*(?:\*\*|__)?(?:【避坑指南】|\[避坑指南\]|（避坑指南）|\(避坑指南\)|《避坑指南》|避坑指南)(?:（[^）\r\n]*）|\([^\r\n)]*\))?(?:\*\*|__)?[ \t]*(?:[:：]|$)",
             line,
         )
         if not heading and not inline:
@@ -861,7 +861,7 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
                 break
             end += 1
         if inline and not heading:
-            list_pattern = re.compile(r"^\s*(?:[-+*]\s+|\d+[.、]\s*)")
+            list_pattern = re.compile(r"^ {0,3}(?:>[ \t]*)*\s*(?:[-+*]\s+|\d+[.、]\s*)")
             first_item = next((i for i in range(index + 1, end) if outside[i] and list_pattern.match(lines[i])), None)
             if first_item is None:
                 continue
@@ -873,10 +873,11 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
                     last_content = i + 1
                     blank = False
                     continue
-                if not item.strip():
+                content = re.sub(r"^ {0,3}(?:>[ \t]*)+", "", item)
+                if not content.strip():
                     blank = True
                     continue
-                if blank and not list_pattern.match(item) and not re.match(r"^(?: {2,}|\t)", item):
+                if blank and not list_pattern.match(item) and not re.match(r"^(?: {2,}|\t)", content):
                     break
                 last_content = i + 1
                 blank = False
@@ -1125,16 +1126,22 @@ def _normalize_html_headings(text: str) -> str:
         procedural = False
         if parent is not None:
             parent_heading = headings[parent]
-            parent_end = next(
-                (h["line"] for h in headings[parent + 1:] if h["level"] <= parent_heading["level"]),
-                len(lines),
-            )
             parent_line = lines[parent_heading["line"]]
-            scope = "".join(lines[parent_heading["line"]:parent_end])
-            procedural = bool(
-                re.search(r"步骤|(?:操作|作业|实施|检修|检查|处理)流程", parent_line)
-                or re.search(r"第\s*[0-9零一二三四五六七八九十百]+\s*步|(?:步骤|step)\s*[0-9零一二三四五六七八九十百]+", scope, re.IGNORECASE)
-            )
+            procedural = bool(re.search(r"步骤|(?:操作|作业|实施|检修|检查|处理)流程", parent_line))
+            if len(indices) > 1 and not procedural:
+                matches = [headings[index]["number"] for index in indices]
+                numbers = [int(match.group(3)) for match in matches]
+                action = re.compile(
+                    r"^(?:(?:首先|然后|接着|随后|其次|最后|下一步|先|再)[，,:：\s]*)?"
+                    r"(?:断电|断开|切断|停机|关闭|打开|开启|准备|检查|检测|确认|核对|验证|复核|安装|拆卸|"
+                    r"取下|连接|接入|插入|选择|填写|输入|扫描|点击|启动|按下|切换|设定|设置|佩戴|隔离|"
+                    r"上锁|挂牌|清理|清洁|清除|取出|放入|放置|采集|取样|调整|执行|提交|保存|记录|复位)"
+                    r"(?!方法|机制|制度|原则|标准|要求|流程|方案|策略|规范|要点|范围|工作|事项|条件|职责)"
+                )
+                procedural = (
+                    numbers == list(range(numbers[0], numbers[0] + len(numbers)))
+                    and all(action.match(match.group(5).lstrip("* ")) for match in matches)
+                )
         for offset, index in enumerate(indices):
             match = headings[index]["number"]
             assert match is not None

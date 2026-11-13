@@ -63,6 +63,23 @@ class HtmlFormattingTest(unittest.TestCase):
         self.assertEqual(section['page_content'], common.parse_canonical_markdown_pages(text, section_title=section['section_title'], output_stem=Path(section['md_name']).stem))
         return section['page_content'][1:]
 
+    def run_markdown(self, body):
+        path = self.root / 'manifest.json'
+        path.write_text(json.dumps({'course_title': 'Course', 'sections': [
+            {'id': '1', 'title': 'Section', 'block_type': 'html', 'content': body}]}, ensure_ascii=False), encoding='utf8')
+        output = self.root / 'out'
+        argv = ['list_course_sections.py', str(path), '--output-dir', str(output)]
+        with patch.dict('os.environ', {'CODEX_HOME': str(self.codex), 'AZURE_OPENAI_API_KEY': 'fake'}), \
+             patch('openai.DefaultHttpxClient', side_effect=_fake_sdk_http_client), \
+             patch.object(sys, 'argv', argv), redirect_stdout(io.StringIO()):
+            self.assertEqual(0, list_course_sections.main())
+        section = json.loads((output / 'section-list.json').read_text(encoding='utf8'))['sections'][0]
+        markdown = (output / section['md_name']).read_text(encoding='utf8')
+        self.assertEqual(section['page_count'], len(section['page_content']))
+        self.assertEqual(section['page_content'], common.parse_canonical_markdown_pages(
+            markdown, section_title=section['section_title'], output_stem=Path(section['md_name']).stem))
+        return section['page_content'][1:]
+
     def test_chinese_numbered_breaks_render_as_list_items(self):
         pages = self.run_course('<h2>标题</h2><p>1、第一项<br>2、第二项<br>3、第三项</p>')
         rendered = MarkdownIt('commonmark').render(pages[0])
@@ -114,6 +131,29 @@ class HtmlFormattingTest(unittest.TestCase):
         self.assertIn('#### 1、先断电', pages[0])
         self.assertIn('#### 2、再检查', pages[0])
         self.assertIn('第2步', pages[0])
+
+    def test_numbered_action_sequence_is_preserved_without_explicit_step_words(self):
+        body = ('## 开机\n\n### 1、设备准备\n\n#### 1、先断电\n\n#### 2、再检查'
+                '\n\n### 2、后续作业')
+        self.assertEqual([body], self.run_markdown(body))
+
+    def test_imperative_action_headings_keep_numbers_without_sequence_adverbs(self):
+        body = ('## 操作\n\n### 1、设备准备\n\n#### 1、打开阀门\n\n#### 2、确认压力'
+                '\n\n#### 3、关闭阀门\n\n### 2、后续作业')
+        self.assertEqual([body], self.run_markdown(body))
+
+    def test_external_step_references_do_not_turn_categories_into_steps(self):
+        body = ('## 主题\n\n### 1、风险分类\n\n#### 1、机械风险\n\n评估时参考第1步的结果。'
+                '\n\n#### 2、电气风险\n\n评估时参考第2步的结果。\n\n### 2、责任分工')
+        self.assertEqual(['## 主题\n\n### 1、风险分类\n\n#### a、机械风险\n\n评估时参考第1步的结果。'
+                          '\n\n#### b、电气风险\n\n评估时参考第2步的结果。\n\n### 2、责任分工'], self.run_markdown(body))
+
+    def test_parallel_concepts_still_use_letters_and_single_heading_loses_number(self):
+        body = ('## 主题\n\n### 1、风险管理\n\n#### 1、检查方法\n\n正文提到先断电、再检查。'
+                '\n\n#### 2、确认机制\n\n### 2、人员管理\n\n#### 1、培训安排\n\n正文。')
+        pages = self.run_markdown(body)
+        self.assertEqual(['## 主题\n\n### 1、风险管理\n\n#### a、检查方法\n\n正文提到先断电、再检查。'
+                          '\n\n#### b、确认机制\n\n### 2、人员管理\n\n#### 培训安排\n\n正文。'], pages)
 
     def test_fence_inside_list_is_not_a_heading(self):
         body = '# Parent\n\n- ```text\n  ## 1. literal in code\n  ```'
@@ -221,6 +261,14 @@ class HtmlFormattingTest(unittest.TestCase):
                 html = '<h2>主题</h2>' + label + '<ul><li>第一坑</li><li>第二坑</li></ul>'
                 with self.assertRaisesRegex(RuntimeError, '避坑指南'):
                     self.run_course(html, splitting_client('* 第二坑'))
+
+    def test_guide_note_with_parenthesis_and_quoted_list_cannot_be_split(self):
+        for html, token in (
+            ('<h2>主题</h2><p>避坑指南（请注意）：</p><ul><li>第一坑</li><li>第二坑</li></ul>', '* 第二坑'),
+            ('<h2>主题</h2><blockquote><p>避坑指南：</p><ul><li>第一坑</li><li>第二坑</li></ul></blockquote>', '> * 第二坑'),
+        ):
+            with self.subTest(html=html), self.assertRaisesRegex(RuntimeError, '避坑指南'):
+                self.run_course(html, splitting_client(token))
 
     def test_bold_inline_guide_with_colon_inside_bold_cannot_split_its_list(self):
         html = '<h2>主题</h2><p><strong>避坑指南：</strong></p><ul><li>第一坑</li><li>第二坑</li></ul>'
