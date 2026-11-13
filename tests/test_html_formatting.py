@@ -270,6 +270,32 @@ class HtmlFormattingTest(unittest.TestCase):
             with self.subTest(html=html), self.assertRaisesRegex(RuntimeError, '避坑指南'):
                 self.run_course(html, splitting_client(token))
 
+    def test_quoted_guide_heading_and_dash_introduction_cannot_be_split(self):
+        samples = (
+            ('<blockquote><h3>避坑指南：注意事项</h3><p>引导</p>'
+             '<ul><li>第一坑</li><li>第二坑</li></ul></blockquote>', '> * 第二坑'),
+            ('<p>避坑指南——请注意：</p><ul><li>第一坑</li><li>第二坑</li></ul>', '* 第二坑'),
+        )
+        for html, token in samples:
+            with self.subTest(html=html), self.assertRaisesRegex(RuntimeError, '避坑指南'):
+                self.run_course(html, splitting_client(token))
+
+    def test_ordinary_quoted_heading_remains_splittable(self):
+        pages = self.run_course('<blockquote><h3>一般指南</h3><p>引导</p>'
+                                '<ul><li>第一项</li><li>第二项</li></ul></blockquote>',
+                                splitting_client('> * 第二项'))
+        self.assertEqual(2, len(pages))
+        self.assertIn('第一项', pages[0])
+        self.assertIn('第二项', pages[1])
+
+    def test_quoted_guide_does_not_absorb_following_unquoted_topic(self):
+        pages = self.run_course('<blockquote><h3>避坑指南</h3><p>引导</p>'
+                                '<ul><li>第一坑</li><li>第二坑</li></ul></blockquote><p>后续主题</p>',
+                                splitting_client('后续主题'))
+        self.assertEqual(2, len(pages))
+        self.assertIn('第二坑', pages[0])
+        self.assertIn('后续主题', pages[1])
+
     def test_bold_inline_guide_with_colon_inside_bold_cannot_split_its_list(self):
         html = '<h2>主题</h2><p><strong>避坑指南：</strong></p><ul><li>第一坑</li><li>第二坑</li></ul>'
         with self.assertRaisesRegex(RuntimeError, '避坑指南'):
