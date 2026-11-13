@@ -101,7 +101,33 @@ class HtmlFormattingTest(unittest.TestCase):
 
     def test_decimal_section_numbers_are_not_mistaken_for_heading_markers(self):
         pages = self.run_course('<h2>1.2 安全规程</h2><p>正文。</p>')
-        self.assertIn('## 1.2 安全规程', pages[0])
+        self.assertIn('<h2>1.2 安全规程</h2>', MarkdownIt('commonmark').render(pages[0]))
+
+    def test_numbered_prefix_wholly_bold_leaves_no_empty_emphasis(self):
+        pages = self.run_course('<h2>上级</h2><h3><strong>1、</strong> 标题</h3><p>内容</p>')
+        self.assertIn('### 标题', pages[0])
+        self.assertNotIn('****', pages[0])
+
+    def test_numbered_subheadings_are_preserved_for_referenced_procedure_steps(self):
+        pages = self.run_course('<h2>主题</h2><h3>1、设备检查流程</h3>'
+                                '<h4>1、先断电</h4><p>内容。</p><h4>2、再检查</h4><p>完成第2步后复位。</p>')
+        self.assertIn('#### 1、先断电', pages[0])
+        self.assertIn('#### 2、再检查', pages[0])
+        self.assertIn('第2步', pages[0])
+
+    def test_fence_inside_list_is_not_a_heading(self):
+        body = '# Parent\n\n- ```text\n  ## 1. literal in code\n  ```'
+        path = self.root / 'manifest.json'
+        path.write_text(json.dumps({'course_title': 'Course', 'sections': [
+            {'id': '1', 'title': 'Section', 'block_type': 'html', 'content': body}]}, ensure_ascii=False), encoding='utf8')
+        output = self.root / 'out'
+        argv = ['list_course_sections.py', str(path), '--output-dir', str(output)]
+        with patch.dict('os.environ', {'CODEX_HOME': str(self.codex), 'AZURE_OPENAI_API_KEY': 'fake'}), \
+             patch('openai.DefaultHttpxClient', side_effect=_fake_sdk_http_client), \
+             patch.object(sys, 'argv', argv), redirect_stdout(io.StringIO()):
+            self.assertEqual(0, list_course_sections.main())
+        section = json.loads((output / 'section-list.json').read_text(encoding='utf8'))['sections'][0]
+        self.assertIn('  ## 1. literal in code', '\n'.join(section['page_content']))
 
     def test_top_level_numbered_heading_is_not_an_isolated_subheading(self):
         pages = self.run_course('<h2>1、章节标题</h2><p>正文。</p>')
@@ -183,6 +209,18 @@ class HtmlFormattingTest(unittest.TestCase):
         self.assertEqual(2, len(pages))
         self.assertIn('第二个', pages[0])
         self.assertIn('本节总结', pages[1])
+
+    def test_labeled_summary_heading_can_start_a_new_page(self):
+        pages = self.run_course('<h2>避坑指南</h2><p>说明。</p><ol><li>第一个</li><li>第二个</li></ol>'
+                                '<h3>本节总结：关键要点</h3><p>总结内容。</p>', splitting_client('### 本节总结'))
+        self.assertEqual(2, len(pages))
+
+    def test_bracketed_and_quoted_guide_labels_protect_following_lists(self):
+        for label in ('<p>【避坑指南】</p>', '<blockquote>避坑指南</blockquote>'):
+            with self.subTest(label=label):
+                html = '<h2>主题</h2>' + label + '<ul><li>第一坑</li><li>第二坑</li></ul>'
+                with self.assertRaisesRegex(RuntimeError, '避坑指南'):
+                    self.run_course(html, splitting_client('* 第二坑'))
 
     def test_bold_inline_guide_with_colon_inside_bold_cannot_split_its_list(self):
         html = '<h2>主题</h2><p><strong>避坑指南：</strong></p><ul><li>第一坑</li><li>第二坑</li></ul>'

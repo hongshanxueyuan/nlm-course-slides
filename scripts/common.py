@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import openai
+from markdown_it import MarkdownIt
 from markdownify import MarkdownConverter, chomp
 
 try:
@@ -125,7 +126,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
-HTML_PAGINATION_RULES_VERSION = 2
+HTML_PAGINATION_RULES_VERSION = 3
 HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
@@ -406,19 +407,12 @@ def _sanitize_html(html: str) -> str:
 
 
 def _outside_fenced_code(lines: list[str]) -> list[bool]:
-    fence: str | None = None
-    outside: list[bool] = []
-    for line in lines:
-        stripped = line.rstrip("\r\n")
-        if fence is not None:
-            outside.append(False)
-            if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", stripped):
-                fence = None
-        else:
-            marker = re.match(r"^ {0,3}(`{3,}|~{3,})", stripped)
-            outside.append(marker is None)
-            if marker:
-                fence = marker.group(1)
+    outside = [True] * len(lines)
+    source = "\n".join(line.rstrip("\r\n") for line in lines)
+    for token in MarkdownIt("commonmark").parse(source):
+        if token.type in {"fence", "code_block"} and token.map:
+            start, end = token.map
+            outside[start:end] = [False] * (end - start)
     return outside
 
 
@@ -433,8 +427,10 @@ class _TeachingMarkdownConverter(MarkdownConverter):
             self.open_marker += "O"
             self.close_marker += "C"
 
-    def convert_strong(self, el: Any, text: str, parent_tags: set[str]) -> str:
-        if {"_noformat", "strong", "b"} & parent_tags:
+    def convert_strong(self, el: Any, text: str, parent_tags: set[str] | bool) -> str:
+        if (isinstance(parent_tags, set) and "_noformat" in parent_tags) or el.find_parent(
+            ["pre", "code", "kbd", "samp", "strong", "b"]
+        ):
             return text
         prefix, suffix, text = chomp(text)
         if not text:
@@ -845,7 +841,10 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
         if not outside[index]:
             continue
         heading = re.match(r"^ {0,3}(#{1,6})\s+.*避坑指南", line)
-        inline = re.match(r"^ {0,3}(?:\*\*|__)?避坑指南(?:\*\*|__)?\s*(?:[:：]|$)", line)
+        inline = re.match(
+            r"^ {0,3}(?:>[ \t]*)*(?:\*\*|__)?(?:【避坑指南】|\[避坑指南\]|（避坑指南）|\(避坑指南\)|《避坑指南》|避坑指南)(?:\*\*|__)?[ \t]*(?:[:：]|$)",
+            line,
+        )
         if not heading and not inline:
             continue
         end = index + 1
@@ -857,7 +856,7 @@ def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
             if re.match(r"^ {0,3}(?:[-*_][ \t]*){3,}$", candidate.rstrip("\r\n")):
                 break
             next_heading = re.match(r"^ {0,3}(#{1,6})\s+", candidate)
-            summary = re.match(r"^ {0,3}#{1,6}\s+(?:本节|全节)?(?:总结|小结)\s*#*\s*$", candidate)
+            summary = re.match(r"^ {0,3}#{1,6}\s+(?:本节|全节)?(?:总结|小结)(?:[：:].*)?\s*#*\s*$", candidate)
             if next_heading and (summary or not heading or len(next_heading.group(1)) <= len(heading.group(1))):
                 break
             end += 1
@@ -1123,12 +1122,25 @@ def _normalize_html_headings(text: str) -> str:
         if heading["number"]:
             groups.setdefault((heading["parent"], heading["level"]), []).append(index)
     for (parent, _), indices in groups.items():
+        procedural = False
+        if parent is not None:
+            parent_heading = headings[parent]
+            parent_end = next(
+                (h["line"] for h in headings[parent + 1:] if h["level"] <= parent_heading["level"]),
+                len(lines),
+            )
+            parent_line = lines[parent_heading["line"]]
+            scope = "".join(lines[parent_heading["line"]:parent_end])
+            procedural = bool(
+                re.search(r"步骤|(?:操作|作业|实施|检修|检查|处理)流程", parent_line)
+                or re.search(r"第\s*[0-9零一二三四五六七八九十百]+\s*步|(?:步骤|step)\s*[0-9零一二三四五六七八九十百]+", scope, re.IGNORECASE)
+            )
         for offset, index in enumerate(indices):
             match = headings[index]["number"]
             assert match is not None
             if len(indices) == 1 and parent is not None:
                 marker = ""
-            elif len(indices) > 1 and parent is not None and headings[parent]["number"]:
+            elif len(indices) > 1 and parent is not None and headings[parent]["number"] and not procedural:
                 number = offset + 1
                 letters = ""
                 while number:
@@ -1138,7 +1150,12 @@ def _normalize_html_headings(text: str) -> str:
             else:
                 continue
             line_index = headings[index]["line"]
-            lines[line_index] = match.group(1) + (match.group(2) or "") + marker + match.group(5) + lines[line_index][match.end():]
+            bold = match.group(2) or ""
+            title = match.group(5)
+            if not marker and bold and title.startswith(bold):
+                bold = ""
+                title = title[2:].lstrip()
+            lines[line_index] = match.group(1) + bold + marker + title + lines[line_index][match.end():]
     return "".join(lines)
 
 
