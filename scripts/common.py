@@ -16,13 +16,15 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 import openai
-from markdownify import markdownify as html_to_markdown
+from markdownify import MarkdownConverter, chomp
 
 try:
     import tomllib
@@ -123,6 +125,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
+HTML_PAGINATION_RULES_VERSION = 2
 HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
@@ -402,11 +405,79 @@ def _sanitize_html(html: str) -> str:
     return sanitized.strip()
 
 
+def _outside_fenced_code(lines: list[str]) -> list[bool]:
+    fence: str | None = None
+    outside: list[bool] = []
+    for line in lines:
+        stripped = line.rstrip("\r\n")
+        if fence is not None:
+            outside.append(False)
+            if re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", stripped):
+                fence = None
+        else:
+            marker = re.match(r"^ {0,3}(`{3,}|~{3,})", stripped)
+            outside.append(marker is None)
+            if marker:
+                fence = marker.group(1)
+    return outside
+
+
+class _TeachingMarkdownConverter(MarkdownConverter):
+    def __init__(self, html: str) -> None:
+        super().__init__(heading_style="ATX")
+        source = unescape(html)
+        stem = "\ue000" + hashlib.sha256(source.encode("utf-8")).hexdigest() + "\ue001"
+        self.open_marker = stem + "O"
+        self.close_marker = stem + "C"
+        while self.open_marker in source or self.close_marker in source:
+            self.open_marker += "O"
+            self.close_marker += "C"
+
+    def convert_strong(self, el: Any, text: str, parent_tags: set[str]) -> str:
+        if {"_noformat", "strong", "b"} & parent_tags:
+            return text
+        prefix, suffix, text = chomp(text)
+        if not text:
+            return ""
+        return f"{prefix}{self.open_marker}{text}{self.close_marker}{suffix}"
+
+    convert_b = convert_strong
+
+    def render(self, html: str) -> str:
+        text = self.convert(html)
+        pattern = re.escape(self.open_marker) + r"(.*?)" + re.escape(self.close_marker)
+
+        def punctuation(char: str) -> bool:
+            return bool(char) and unicodedata.category(char)[0] in {"P", "S"}
+
+        def replace(match: re.Match[str]) -> str:
+            content = match.group(1)
+            before = text[match.start() - 1] if match.start() else ""
+            after = text[match.end()] if match.end() < len(text) else ""
+            prefix = " " if punctuation(content[0]) and before and not before.isspace() and not punctuation(before) else ""
+            suffix = " " if punctuation(content[-1]) and after and not after.isspace() and not punctuation(after) else ""
+            return f"{prefix}**{content}**{suffix}"
+
+        return re.sub(pattern, replace, text, flags=re.DOTALL)
+
+
 def _render_html(raw_html: str) -> str:
     html = _sanitize_html(raw_html)
-    return _remove_image_links(
-        html_to_markdown(html, heading_style="ATX")
+    rendered = _remove_image_links(
+        _TeachingMarkdownConverter(html).render(html)
     ).strip()
+    lines = rendered.splitlines()
+    normalized: list[str] = []
+    for line, outside in zip(lines, _outside_fenced_code(lines)):
+        if outside:
+            match = re.match(r"^(\s{0,3})(\d+)、\s*", line)
+            if match:
+                if (match.group(2) != "1" and normalized and normalized[-1].strip()
+                        and not re.match(r"^\s*\d+[.、]\s*", normalized[-1])):
+                    normalized.append("")
+                line = match.group(1) + match.group(2) + ". " + line[match.end():]
+        normalized.append(line)
+    return "\n".join(normalized)
 
 
 def _normalize_explicit_page_content(page_content: list[str]) -> list[str]:
@@ -494,7 +565,7 @@ def prepare_html_pagination_request(text: str) -> HtmlPaginationRequest:
     ]
     request_hash = hashlib.sha256(
         json.dumps(
-            [model, reasoning_effort, system_prompt, prompt, schema, provider_identity],
+            [HTML_PAGINATION_RULES_VERSION, model, reasoning_effort, system_prompt, prompt, schema, provider_identity],
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8")
@@ -717,6 +788,13 @@ def paginate_markdown_content(
         else None
     )
     if model_output is not None:
+        try:
+            cached_pages = _normalize_explicit_page_content([page["content"] for page in model_output["pages"]])
+            _validate_html_pagination_source_coverage(text, cached_pages)
+            _validate_html_avoidance_groups(text, cached_pages)
+        except RuntimeError:
+            model_output = None
+    if model_output is not None:
         log_message(f"[stage-b] section {section_id}: reusing cached HTML pages")
     else:
         started_at = time.monotonic()
@@ -734,6 +812,7 @@ def paginate_markdown_content(
         write_json(model_output_path, model_output)
     pages = _normalize_explicit_page_content([page["content"] for page in model_output["pages"]])
     _validate_html_pagination_source_coverage(text, pages)
+    _validate_html_avoidance_groups(text, pages)
     if pagination_cache is not None and cache_identity is not None:
         pagination_cache.store(cache_identity, request_hash, model_output)
     return pages
@@ -751,6 +830,76 @@ def _validate_html_pagination_source_coverage(text: str, pages: list[str]) -> No
         cursor = start + len(page)
     if source[cursor:].strip():
         raise RuntimeError("html pagination pages do not cover all source text")
+
+
+def _avoidance_group_ranges(text: str) -> list[tuple[int, int]]:
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    position = 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line)
+    groups: list[tuple[int, int]] = []
+    outside = _outside_fenced_code(lines)
+    for index, line in enumerate(lines):
+        if not outside[index]:
+            continue
+        heading = re.match(r"^ {0,3}(#{1,6})\s+.*避坑指南", line)
+        inline = re.match(r"^ {0,3}(?:\*\*|__)?避坑指南(?:\*\*|__)?\s*(?:[:：]|$)", line)
+        if not heading and not inline:
+            continue
+        end = index + 1
+        while end < len(lines):
+            candidate = lines[end]
+            if not outside[end]:
+                end += 1
+                continue
+            if re.match(r"^ {0,3}(?:[-*_][ \t]*){3,}$", candidate.rstrip("\r\n")):
+                break
+            next_heading = re.match(r"^ {0,3}(#{1,6})\s+", candidate)
+            summary = re.match(r"^ {0,3}#{1,6}\s+(?:本节|全节)?(?:总结|小结)\s*#*\s*$", candidate)
+            if next_heading and (summary or not heading or len(next_heading.group(1)) <= len(heading.group(1))):
+                break
+            end += 1
+        if inline and not heading:
+            list_pattern = re.compile(r"^\s*(?:[-+*]\s+|\d+[.、]\s*)")
+            first_item = next((i for i in range(index + 1, end) if outside[i] and list_pattern.match(lines[i])), None)
+            if first_item is None:
+                continue
+            last_content = first_item + 1
+            blank = False
+            for i in range(first_item + 1, end):
+                item = lines[i]
+                if not outside[i]:
+                    last_content = i + 1
+                    blank = False
+                    continue
+                if not item.strip():
+                    blank = True
+                    continue
+                if blank and not list_pattern.match(item) and not re.match(r"^(?: {2,}|\t)", item):
+                    break
+                last_content = i + 1
+                blank = False
+            end = last_content
+        start_offset = offsets[index]
+        end_offset = offsets[end] if end < len(lines) else len(text)
+        groups.append((start_offset, end_offset))
+    return groups
+
+
+def _validate_html_avoidance_groups(text: str, pages: list[str]) -> None:
+    source = _clean_page_body(text)
+    ranges = _avoidance_group_ranges(source)
+    cursor = 0
+    for page in pages:
+        start = source.find(page, cursor)
+        if any(begin < start < end for begin, end in ranges):
+            raise RuntimeError("html pagination split a 避坑指南 group across pages")
+        cursor = start + len(page)
+    for begin, end in ranges:
+        if len(source[begin:end]) > 1500:
+            log_message("[stage-b] 避坑指南 is long and may crowd one page")
 
 
 def _strip_legacy_preface(
@@ -951,6 +1100,48 @@ def _remove_backslashes(text: str) -> str:
     return (text or "").replace("\\", "").strip("\r\n")
 
 
+def _normalize_html_headings(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    headings: list[dict[str, Any]] = []
+    stack: list[int] = []
+    for line_index, (line, outside) in enumerate(zip(lines, _outside_fenced_code(lines))):
+        if not outside:
+            continue
+        match = re.match(r"^( {0,3}#{1,6}[ \t]+)(\*\*)?(\d+)([、]|[.．](?=[ \t]))[ \t]*(.*)", line)
+        heading = re.match(r"^ {0,3}(#{1,6})[ \t]+", line)
+        if not heading:
+            continue
+        level = len(heading.group(1))
+        while stack and headings[stack[-1]]["level"] >= level:
+            stack.pop()
+        parent = stack[-1] if stack else None
+        headings.append({"line": line_index, "level": level, "parent": parent, "number": match})
+        stack.append(len(headings) - 1)
+
+    groups: dict[tuple[int | None, int], list[int]] = {}
+    for index, heading in enumerate(headings):
+        if heading["number"]:
+            groups.setdefault((heading["parent"], heading["level"]), []).append(index)
+    for (parent, _), indices in groups.items():
+        for offset, index in enumerate(indices):
+            match = headings[index]["number"]
+            assert match is not None
+            if len(indices) == 1 and parent is not None:
+                marker = ""
+            elif len(indices) > 1 and parent is not None and headings[parent]["number"]:
+                number = offset + 1
+                letters = ""
+                while number:
+                    number, remainder = divmod(number - 1, 26)
+                    letters = chr(ord("a") + remainder) + letters
+                marker = letters + "、"
+            else:
+                continue
+            line_index = headings[index]["line"]
+            lines[line_index] = match.group(1) + (match.group(2) or "") + marker + match.group(5) + lines[line_index][match.end():]
+    return "".join(lines)
+
+
 def _select_html_source_text(section: Section) -> str:
     if section.source_blocks:
         html_blocks = _select_fira_teaching_blocks(section.source_blocks)
@@ -961,10 +1152,10 @@ def _select_html_source_text(section: Section) -> str:
         ]
         html_texts = [text for text in html_texts if text]
         if html_texts:
-            return "\n\n".join(html_texts).strip()
+            return _normalize_html_headings("\n\n".join(html_texts).strip())
         raise RuntimeError(f"Section {section.id} has no usable teaching block")
     if section.content.strip():
-        return _clean_page_body(section.content)
+        return _normalize_html_headings(_clean_page_body(section.content))
     raise RuntimeError(
         f"Section {section.id} is on the html route but has no usable teaching text"
     )

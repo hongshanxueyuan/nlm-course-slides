@@ -18,6 +18,8 @@ from common import (
     _normalize_explicit_page_content,
     _resolve_section_block_type,
     _select_html_source_text,
+    _validate_html_avoidance_groups,
+    _validate_html_pagination_source_coverage,
     load_course_manifest,
     materialize_section_markdown,
     prepare_html_pagination_request,
@@ -104,6 +106,9 @@ def _validated_pages(
         return None
     try:
         pages = _normalize_explicit_page_content(raw_pages)
+        source = _select_html_source_text(section)
+        _validate_html_pagination_source_coverage(source, pages)
+        _validate_html_avoidance_groups(source, pages)
     except RuntimeError:
         return None
     if payload.get("page_count") != len(pages):
