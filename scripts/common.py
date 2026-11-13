@@ -5,6 +5,7 @@ Shared helpers for the nlm-course-slides skill.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -126,11 +127,13 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
-HTML_PAGINATION_RULES_VERSION = 5
+HTML_PAGINATION_RULES_VERSION = 6
 HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
 HTML_PAGINATION_SCHEMA_PATH = PROMPTS_DIR / "html-pagination-schema.json"
+HTML_HEADING_GROUP_PROMPT_PATH = PROMPTS_DIR / "html-pagination-heading-groups.txt"
+HTML_HEADING_GROUP_SCHEMA_PATH = PROMPTS_DIR / "html-pagination-heading-groups-schema.json"
 HTML_PAGINATION_REQUEST_TIMEOUT_SECONDS = 900.0
 HTML_PAGINATION_CACHE_FILENAME = ".html-pagination-cache.json"
 HTML_PAGINATION_FAILURE_REPORT_FILENAME = "section-list-failure.json"
@@ -551,6 +554,20 @@ def prepare_html_pagination_request(text: str) -> HtmlPaginationRequest:
     if not normalized:
         raise RuntimeError("html route requires non-empty Markdown-rendered teaching text")
     prompt = template.replace("{text}", normalized)
+    groups = _heading_group_inventory(normalized)
+    if groups:
+        try:
+            group_prompt = HTML_HEADING_GROUP_PROMPT_PATH.read_text(encoding="utf-8").strip()
+            group_schema = json.loads(HTML_HEADING_GROUP_SCHEMA_PATH.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Could not load HTML heading group prompt or output contract") from exc
+        if "{heading_groups}" not in group_prompt or not isinstance(group_schema, dict):
+            raise RuntimeError("Invalid HTML heading group prompt or output contract")
+        group_prompt = group_prompt.replace("{heading_groups}", json.dumps(groups, ensure_ascii=False))
+        prompt += "\n\n" + group_prompt
+        schema = copy.deepcopy(schema)
+        schema["properties"]["heading_groups"] = group_schema
+        schema["required"].append("heading_groups")
     provider = _load_codex_html_pagination_config(require_api_key=False)
     provider_identity = [
         provider.provider_name,
@@ -785,9 +802,7 @@ def paginate_markdown_content(
     )
     if model_output is not None:
         try:
-            cached_pages = _normalize_explicit_page_content([page["content"] for page in model_output["pages"]])
-            _validate_html_pagination_source_coverage(text, cached_pages)
-            _validate_html_avoidance_groups(text, cached_pages)
+            validate_and_transform_html_pages(text, model_output)
         except RuntimeError:
             model_output = None
     if model_output is not None:
@@ -806,9 +821,7 @@ def paginate_markdown_content(
             raise
     if model_output_path is not None:
         write_json(model_output_path, model_output)
-    pages = _normalize_explicit_page_content([page["content"] for page in model_output["pages"]])
-    _validate_html_pagination_source_coverage(text, pages)
-    _validate_html_avoidance_groups(text, pages)
+    pages = validate_and_transform_html_pages(text, model_output)
     if pagination_cache is not None and cache_identity is not None:
         pagination_cache.store(cache_identity, request_hash, model_output)
     return pages
@@ -1106,15 +1119,15 @@ def _remove_backslashes(text: str) -> str:
     return (text or "").replace("\\", "").strip("\r\n")
 
 
-def _normalize_html_headings(text: str) -> str:
+def _html_heading_structure(text: str) -> tuple[list[str], list[dict[str, Any]], dict[tuple[int | None, int], list[int]]]:
     lines = text.splitlines(keepends=True)
     headings: list[dict[str, Any]] = []
     stack: list[int] = []
     for line_index, (line, outside) in enumerate(zip(lines, _outside_fenced_code(lines))):
         if not outside:
             continue
-        match = re.match(r"^( {0,3}#{1,6}[ \t]+)(\*\*)?(\d+)([、]|[.．](?=[ \t]))[ \t]*(.*)", line)
-        heading = re.match(r"^ {0,3}(#{1,6})[ \t]+", line)
+        match = re.match(r"^( {0,3}(?:>[ \t]*)*#{1,6}[ \t]+)(\*\*)?(\d+)([、]|[.．](?=[ \t]))[ \t]*(.*)", line)
+        heading = re.match(r"^ {0,3}(?:>[ \t]*)*(#{1,6})[ \t]+", line)
         if not heading:
             continue
         level = len(heading.group(1))
@@ -1128,32 +1141,61 @@ def _normalize_html_headings(text: str) -> str:
     for index, heading in enumerate(headings):
         if heading["number"]:
             groups.setdefault((heading["parent"], heading["level"]), []).append(index)
-    for (parent, _), indices in groups.items():
-        procedural = False
-        if parent is not None:
-            parent_heading = headings[parent]
-            parent_line = lines[parent_heading["line"]]
-            procedural = bool(re.search(r"步骤|(?:操作|作业|实施|检修|检查|处理)流程", parent_line))
-            if len(indices) > 1 and not procedural:
-                matches = [headings[index]["number"] for index in indices]
-                numbers = [int(match.group(3)) for match in matches]
-                action = re.compile(
-                    r"^(?:(?:首先|然后|接着|随后|其次|最后|下一步|先|再)[，,:：\s]*)?"
-                    r"(?:断电|断开|切断|停机|关闭|打开|开启|准备|检查|检测|确认|核对|验证|复核|安装|拆卸|"
-                    r"取下|连接|接入|插入|选择|填写|输入|扫描|点击|启动|按下|切换|设定|设置|佩戴|隔离|"
-                    r"上锁|挂牌|清理|清洁|清除|取出|放入|放置|采集|取样|调整|执行|提交|保存|记录|复位)"
-                    r"(?!方法|机制|制度|原则|标准|要求|流程|方案|策略|规范|要点|范围|工作|事项|条件|职责)"
-                )
-                procedural = (
-                    numbers == list(range(numbers[0], numbers[0] + len(numbers)))
-                    and all(action.match(match.group(5).lstrip("* ")) for match in matches)
-                )
+    return lines, headings, groups
+
+
+def _heading_group_id(headings: list[dict[str, Any]], parent: int, level: int) -> str:
+    return f"h{headings[parent]['line'] + 1}-l{level}"
+
+
+def _heading_group_inventory(text: str) -> list[dict[str, Any]]:
+    lines, headings, groups = _html_heading_structure(text)
+    return [
+        {
+            "group_id": _heading_group_id(headings, parent, level),
+            "parent": lines[headings[parent]["line"]].strip(),
+            "headings": [lines[headings[index]["line"]].strip() for index in indices],
+        }
+        for (parent, level), indices in groups.items()
+        if parent is not None and headings[parent]["number"] and len(indices) > 1
+    ]
+
+
+def _html_heading_edits(text: str, payload: dict[str, Any]) -> list[tuple[int, int, str]]:
+    lines, headings, groups = _html_heading_structure(text)
+    expected = {group["group_id"] for group in _heading_group_inventory(text)}
+    raw_groups = payload.get("heading_groups", [])
+    if not isinstance(raw_groups, list):
+        raise RuntimeError("html pagination heading_groups must be a list")
+    classifications: dict[str, str] = {}
+    for group in raw_groups:
+        if not isinstance(group, dict) or set(group) != {"group_id", "kind"}:
+            raise RuntimeError("html pagination heading group classification is invalid")
+        group_id, kind = group["group_id"], group["kind"]
+        if not isinstance(group_id, str) or group_id not in expected or group_id in classifications:
+            raise RuntimeError("html pagination heading group ID is unknown or duplicated")
+        if not isinstance(kind, str) or kind not in {"steps", "topics", "uncertain"}:
+            raise RuntimeError("html pagination heading group kind is invalid")
+        classifications[group_id] = kind
+    if set(classifications) != expected:
+        raise RuntimeError("html pagination heading group classifications are missing")
+    if "uncertain" in classifications.values():
+        raise RuntimeError("html pagination heading group classification is uncertain")
+
+    offsets: list[int] = []
+    position = 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line)
+    edits: list[tuple[int, int, str]] = []
+    for (parent, level), indices in groups.items():
         for offset, index in enumerate(indices):
             match = headings[index]["number"]
             assert match is not None
             if len(indices) == 1 and parent is not None:
                 marker = ""
-            elif len(indices) > 1 and parent is not None and headings[parent]["number"] and not procedural:
+            elif (len(indices) > 1 and parent is not None and headings[parent]["number"]
+                  and classifications[_heading_group_id(headings, parent, level)] == "topics"):
                 number = offset + 1
                 letters = ""
                 while number:
@@ -1168,8 +1210,39 @@ def _normalize_html_headings(text: str) -> str:
             if not marker and bold and title.startswith(bold):
                 bold = ""
                 title = title[2:].lstrip()
-            lines[line_index] = match.group(1) + bold + marker + title + lines[line_index][match.end():]
-    return "".join(lines)
+            replacement = match.group(1) + bold + marker + title
+            edits.append((offsets[line_index], offsets[line_index] + match.end(), replacement))
+    return sorted(edits, key=lambda edit: edit[0])
+
+
+def validate_and_transform_html_pages(text: str, payload: Any) -> list[str]:
+    output = _validate_html_pagination_model_output(payload)
+    source = _clean_page_body(text)
+    pages = _normalize_explicit_page_content([page["content"] for page in output["pages"]])
+    _validate_html_pagination_source_coverage(source, pages)
+    _validate_html_avoidance_groups(source, pages)
+    edits = _html_heading_edits(source, output)
+    page_ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for page in pages:
+        start = source.find(page, cursor)
+        page_ranges.append((start, start + len(page)))
+        cursor = start + len(page)
+    for start, end, _ in edits:
+        if not any(page_start <= start and end <= page_end for page_start, page_end in page_ranges):
+            raise RuntimeError("html pagination split a numbered heading across pages")
+    transformed = []
+    for page, (page_start, page_end) in zip(pages, page_ranges):
+        for start, end, replacement in reversed(edits):
+            if page_start <= start and end <= page_end:
+                page = page[:start - page_start] + replacement + page[end - page_start:]
+        transformed.append(page)
+    normalized_source = source
+    for start, end, replacement in reversed(edits):
+        normalized_source = normalized_source[:start] + replacement + normalized_source[end:]
+    _validate_html_pagination_source_coverage(normalized_source, transformed)
+    _validate_html_avoidance_groups(normalized_source, transformed)
+    return transformed
 
 
 def _select_html_source_text(section: Section) -> str:
@@ -1182,10 +1255,10 @@ def _select_html_source_text(section: Section) -> str:
         ]
         html_texts = [text for text in html_texts if text]
         if html_texts:
-            return _normalize_html_headings("\n\n".join(html_texts).strip())
+            return "\n\n".join(html_texts).strip()
         raise RuntimeError(f"Section {section.id} has no usable teaching block")
     if section.content.strip():
-        return _normalize_html_headings(_clean_page_body(section.content))
+        return _clean_page_body(section.content)
     raise RuntimeError(
         f"Section {section.id} is on the html route but has no usable teaching text"
     )

@@ -18,12 +18,11 @@ from common import (
     _normalize_explicit_page_content,
     _resolve_section_block_type,
     _select_html_source_text,
-    _validate_html_avoidance_groups,
-    _validate_html_pagination_source_coverage,
     load_course_manifest,
     materialize_section_markdown,
     prepare_html_pagination_request,
     read_json,
+    validate_and_transform_html_pages,
     write_json,
 )
 
@@ -89,6 +88,7 @@ def _validated_pages(
     section_index: int,
     section: Section,
     request_hash: str,
+    model_output: Any,
 ) -> list[str] | None:
     if not payload or any(
         (
@@ -107,8 +107,8 @@ def _validated_pages(
     try:
         pages = _normalize_explicit_page_content(raw_pages)
         source = _select_html_source_text(section)
-        _validate_html_pagination_source_coverage(source, pages)
-        _validate_html_avoidance_groups(source, pages)
+        if pages != validate_and_transform_html_pages(source, model_output):
+            return None
     except RuntimeError:
         return None
     if payload.get("page_count") != len(pages):
@@ -131,10 +131,10 @@ def _load_valid_pages(
     if not isinstance(payload, dict):
         return None
     try:
-        model_hash = hashlib.sha256(
-            _model_output_path(path.parent, section_index).read_bytes()
-        ).hexdigest()
-    except OSError:
+        model_bytes = _model_output_path(path.parent, section_index).read_bytes()
+        model_hash = hashlib.sha256(model_bytes).hexdigest()
+        model_output = json.loads(model_bytes)
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
     if payload.get("model_output_sha256") != model_hash:
         return None
@@ -144,6 +144,7 @@ def _load_valid_pages(
         section_index=section_index,
         section=section,
         request_hash=request_hash,
+        model_output=model_output,
     )
 
 
