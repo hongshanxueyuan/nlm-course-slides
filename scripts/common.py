@@ -127,7 +127,7 @@ EMPTY_MARKDOWN_HEADING_RE = re.compile(r" {0,3}#{1,6}[ \t]*")
 HTML_PAGINATION_MAX_PAGES = 20
 HTML_PAGINATION_COVER_BODY_MAX_PAGES = 19
 HTML_PAGINATION_MODEL = "gpt-6.1-terra"
-HTML_PAGINATION_RULES_VERSION = 6
+HTML_PAGINATION_RULES_VERSION = 7
 HTML_PAGINATION_REASONING_EFFORT = "medium"
 HTML_PAGINATION_SYSTEM_PATH = PROMPTS_DIR / "html-pagination-system.txt"
 HTML_PAGINATION_USER_PATH = PROMPTS_DIR / "html-pagination-user.txt"
@@ -1119,10 +1119,19 @@ def _remove_backslashes(text: str) -> str:
     return (text or "").replace("\\", "").strip("\r\n")
 
 
-def _html_heading_structure(text: str) -> tuple[list[str], list[dict[str, Any]], dict[tuple[int | None, int], list[int]]]:
+def _html_heading_structure(text: str) -> tuple[list[str], list[dict[str, Any]], dict[tuple[int | None, int, tuple[int, ...]], list[int]]]:
     lines = text.splitlines(keepends=True)
     headings: list[dict[str, Any]] = []
     stack: list[int] = []
+    quote_stack: list[int] = []
+    quote_scopes: dict[int, tuple[int, ...]] = {}
+    for token in MarkdownIt("commonmark").parse(text):
+        if token.type == "blockquote_open" and token.map:
+            quote_stack.append(token.map[0] + 1)
+        elif token.type == "blockquote_close":
+            quote_stack.pop()
+        elif token.type == "heading_open" and token.map:
+            quote_scopes[token.map[0]] = tuple(quote_stack)
     for line_index, (line, outside) in enumerate(zip(lines, _outside_fenced_code(lines))):
         if not outside:
             continue
@@ -1131,37 +1140,42 @@ def _html_heading_structure(text: str) -> tuple[list[str], list[dict[str, Any]],
         if not heading:
             continue
         level = len(heading.group(1))
-        while stack and headings[stack[-1]]["level"] >= level:
+        scope = quote_scopes.get(line_index, ())
+        while stack and (
+            headings[stack[-1]]["level"] >= level
+            or scope[:len(headings[stack[-1]]["scope"])] != headings[stack[-1]]["scope"]
+        ):
             stack.pop()
         parent = stack[-1] if stack else None
-        headings.append({"line": line_index, "level": level, "parent": parent, "number": match})
+        headings.append({"line": line_index, "level": level, "parent": parent, "number": match, "scope": scope})
         stack.append(len(headings) - 1)
 
-    groups: dict[tuple[int | None, int], list[int]] = {}
+    groups: dict[tuple[int | None, int, tuple[int, ...]], list[int]] = {}
     for index, heading in enumerate(headings):
         if heading["number"]:
-            groups.setdefault((heading["parent"], heading["level"]), []).append(index)
+            groups.setdefault((heading["parent"], heading["level"], heading["scope"]), []).append(index)
     return lines, headings, groups
 
 
-def _heading_group_id(headings: list[dict[str, Any]], parent: int, level: int) -> str:
-    return f"h{headings[parent]['line'] + 1}-l{level}"
+def _heading_group_id(headings: list[dict[str, Any]], parent: int, level: int, scope: tuple[int, ...]) -> str:
+    base = f"h{headings[parent]['line'] + 1}-l{level}"
+    return base + ("-q" + ".".join(map(str, scope)) if scope else "")
 
 
 def _heading_group_inventory(text: str) -> list[dict[str, Any]]:
     lines, headings, groups = _html_heading_structure(text)
     return [
         {
-            "group_id": _heading_group_id(headings, parent, level),
+            "group_id": _heading_group_id(headings, parent, level, scope),
             "parent": lines[headings[parent]["line"]].strip(),
             "headings": [lines[headings[index]["line"]].strip() for index in indices],
         }
-        for (parent, level), indices in groups.items()
+        for (parent, level, scope), indices in groups.items()
         if parent is not None and headings[parent]["number"] and len(indices) > 1
     ]
 
 
-def _html_heading_edits(text: str, payload: dict[str, Any]) -> list[tuple[int, int, str]]:
+def _html_heading_edits(text: str, payload: dict[str, Any]) -> tuple[list[tuple[int, int, str]], list[tuple[int, int]]]:
     lines, headings, groups = _html_heading_structure(text)
     expected = {group["group_id"] for group in _heading_group_inventory(text)}
     raw_groups = payload.get("heading_groups", [])
@@ -1187,15 +1201,23 @@ def _html_heading_edits(text: str, payload: dict[str, Any]) -> list[tuple[int, i
     for line in lines:
         offsets.append(position)
         position += len(line)
+    ranges: list[tuple[int, int]] = []
+    for heading in headings:
+        if heading["number"]:
+            line_index = heading["line"]
+            line = lines[line_index]
+            leading = len(line) - len(line.lstrip(" \t"))
+            end = len(line.rstrip(" \t\r\n"))
+            ranges.append((offsets[line_index] + leading, offsets[line_index] + end))
     edits: list[tuple[int, int, str]] = []
-    for (parent, level), indices in groups.items():
+    for (parent, level, scope), indices in groups.items():
         for offset, index in enumerate(indices):
             match = headings[index]["number"]
             assert match is not None
             if len(indices) == 1 and parent is not None:
                 marker = ""
             elif (len(indices) > 1 and parent is not None and headings[parent]["number"]
-                  and classifications[_heading_group_id(headings, parent, level)] == "topics"):
+                  and classifications[_heading_group_id(headings, parent, level, scope)] == "topics"):
                 number = offset + 1
                 letters = ""
                 while number:
@@ -1207,12 +1229,15 @@ def _html_heading_edits(text: str, payload: dict[str, Any]) -> list[tuple[int, i
             line_index = headings[index]["line"]
             bold = match.group(2) or ""
             title = match.group(5)
+            start = match.start(3)
+            end = match.end(4) if marker else match.start(5)
             if not marker and bold and title.startswith(bold):
-                bold = ""
-                title = title[2:].lstrip()
-            replacement = match.group(1) + bold + marker + title
-            edits.append((offsets[line_index], offsets[line_index] + match.end(), replacement))
-    return sorted(edits, key=lambda edit: edit[0])
+                start = match.start(2)
+                end = match.start(5) + len(bold)
+                while end < match.end() and lines[line_index][end] in " \t":
+                    end += 1
+            edits.append((offsets[line_index] + start, offsets[line_index] + end, marker))
+    return sorted(edits, key=lambda edit: edit[0]), ranges
 
 
 def validate_and_transform_html_pages(text: str, payload: Any) -> list[str]:
@@ -1221,14 +1246,14 @@ def validate_and_transform_html_pages(text: str, payload: Any) -> list[str]:
     pages = _normalize_explicit_page_content([page["content"] for page in output["pages"]])
     _validate_html_pagination_source_coverage(source, pages)
     _validate_html_avoidance_groups(source, pages)
-    edits = _html_heading_edits(source, output)
+    edits, heading_ranges = _html_heading_edits(source, output)
     page_ranges: list[tuple[int, int]] = []
     cursor = 0
     for page in pages:
         start = source.find(page, cursor)
         page_ranges.append((start, start + len(page)))
         cursor = start + len(page)
-    for start, end, _ in edits:
+    for start, end in heading_ranges:
         if not any(page_start <= start and end <= page_end for page_start, page_end in page_ranges):
             raise RuntimeError("html pagination split a numbered heading across pages")
     transformed = []

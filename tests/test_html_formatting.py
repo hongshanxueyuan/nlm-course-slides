@@ -205,8 +205,33 @@ class HtmlFormattingTest(unittest.TestCase):
     def test_numbered_headings_inside_a_quote_use_semantic_classification(self):
         body = ('## 主题\n\n> ### 1、风险分类\n>\n> #### 1、机械风险\n>\n'
                 '> #### 2、电气风险\n\n### 2、后续')
-        pages = self.run_markdown(body, splitting_client(classifications=[{'group_id': 'h3-l4', 'kind': 'topics'}]))
-        self.assertEqual([body.replace('#### 1、机械', '#### a、机械').replace('#### 2、电气', '#### b、电气')], pages)
+        pages = self.run_markdown(body, splitting_client(classifications=[{'group_id': 'h3-l4-q3', 'kind': 'topics'}]))
+        expected = (body.replace('> ### 1、风险分类', '> ### 风险分类').replace('### 2、后续', '### 后续')
+                    .replace('#### 1、机械', '#### a、机械').replace('#### 2、电气', '#### b、电气'))
+        self.assertEqual([expected], pages)
+
+    def test_quote_heading_scope_ends_before_external_headings_even_across_pages(self):
+        body = ('## 主题\n\n> ### 1、引用内容\n>\n> #### 1、引用甲\n>\n> #### 2、引用乙'
+                '\n\n#### 1、外部甲\n\n#### 2、外部乙')
+        pages = self.run_markdown(body, splitting_client('#### 1、外部甲'))
+        self.assertEqual(['## 主题\n\n> ### 引用内容\n>\n> #### a、引用甲\n>\n> #### b、引用乙',
+                          '#### 1、外部甲\n\n#### 2、外部乙'], pages)
+
+    def test_nested_quote_headings_have_separate_sibling_groups(self):
+        body = ('## 主题\n\n### 1、上级\n\n> #### 1、外层甲\n>\n> #### 2、外层乙\n>\n'
+                '> > #### 1、内层甲\n> >\n> > #### 2、内层乙\n>\n> #### 3、外层丙\n\n### 2、其他')
+        expected = (body.replace('#### 1、外层甲', '#### a、外层甲').replace('#### 2、外层乙', '#### b、外层乙')
+                    .replace('#### 3、外层丙', '#### c、外层丙').replace('#### 1、内层甲', '#### a、内层甲')
+                    .replace('#### 2、内层乙', '#### b、内层乙'))
+        self.assertEqual([expected], self.run_markdown(body))
+
+    def test_separate_quotes_do_not_form_a_single_sibling_group(self):
+        body = ('## 主题\n\n### 1、上级\n\n> #### 1、第一引用\n\n引用之外的正文。'
+                '\n\n> #### 2、第二引用\n\n### 2、后续')
+        expected = body.replace('#### 1、第一引用', '#### 第一引用').replace('#### 2、第二引用', '#### 第二引用')
+        requests = []
+        self.assertEqual([expected], self.run_markdown(body, splitting_client(requests=requests)))
+        self.assertNotIn('heading_groups', requests[0]['text']['format']['schema']['properties'])
 
     def test_model_cannot_drop_or_rewrite_source_while_returning_classifications(self):
         body = '## 主题\n\n### 1、分类\n\n#### 1、甲\n\n重复。\n\n#### 2、乙\n\n重复。\n\n### 2、其他'
@@ -220,6 +245,20 @@ class HtmlFormattingTest(unittest.TestCase):
         client = splitting_client('风险\n\n#### 2', classifications=[{'group_id': 'h3-l4', 'kind': 'topics'}])
         with self.assertRaisesRegex(RuntimeError, 'split a numbered heading'):
             self.run_markdown(body, client)
+
+    def test_page_boundary_cannot_split_a_numbered_step_heading(self):
+        body = '## 主题\n\n### 1、准备\n\n#### 1、校准\n\n#### 2、预热\n\n### 2、后续'
+        client = splitting_client('校准', classifications=[{'group_id': 'h3-l4', 'kind': 'steps'}])
+        with self.assertRaisesRegex(RuntimeError, 'split a numbered heading'):
+            self.run_markdown(body, client)
+
+    def test_omitted_page_edge_indent_is_not_a_split_numbered_heading(self):
+        body = '## 主题\n\n  ### 1、唯一\n\n说明。'
+        pages = self.run_markdown(body, splitting_client('  ### 1、唯一'))
+        self.assertEqual(['## 主题', '### 唯一\n\n说明。'], pages)
+        body = '# Parent\n\n  ## 1. Single  '
+        pages = self.run_markdown(body, splitting_client('  ## 1. Single'))
+        self.assertEqual(['# Parent', '## Single'], pages)
 
     def test_imperative_action_headings_keep_numbers_without_sequence_adverbs(self):
         body = ('## 操作\n\n### 1、设备准备\n\n#### 1、打开阀门\n\n#### 2、确认压力'
@@ -484,6 +523,18 @@ class HtmlFormattingTest(unittest.TestCase):
             model_path.write_bytes(model_bytes)
             result['model_output_sha256'] = hashlib.sha256(model_bytes).hexdigest()
             result['pages'] = [body.replace('1、校准', 'a、校准').replace('2、预热', 'b、预热')]
+            result_path.write_text(json.dumps(result, ensure_ascii=False), encoding='utf8')
+            self.assertEqual('pending', html_pagination_worker.list_jobs(source, workers)['jobs'][0]['status'])
+            with self.assertRaisesRegex(RuntimeError, 'Missing or stale'):
+                html_pagination_worker.apply_results(common.load_course_manifest(source), workers)
+
+            split_at = body.index('校准')
+            split_pages = [body[:split_at].strip(), body[split_at:].strip()]
+            forged_split = json.loads(model_bytes)
+            forged_split['pages'] = [{'content': page} for page in split_pages]
+            model_path.write_text(json.dumps(forged_split, ensure_ascii=False), encoding='utf8')
+            result['model_output_sha256'] = hashlib.sha256(model_path.read_bytes()).hexdigest()
+            result['pages'], result['page_count'] = split_pages, len(split_pages)
             result_path.write_text(json.dumps(result, ensure_ascii=False), encoding='utf8')
             self.assertEqual('pending', html_pagination_worker.list_jobs(source, workers)['jobs'][0]['status'])
             with self.assertRaisesRegex(RuntimeError, 'Missing or stale'):
